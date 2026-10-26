@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Manage the collapsible personal-AWS 'alpha' deployment phase for the BranchBench leaderboard.
+# Manage the collapsible DAPLab AWS 'alpha' deployment phase for the BranchBench leaderboard.
 #
 # Usage:
-#   ./leaderboard/aws_alpha.sh up [--region us-east-1] [--instance-type i4i.2xlarge] [--spot]
-#   ./leaderboard/aws_alpha.sh run [--preset mini] [--systems "dolt dolt_mysql"] [--collapse-after]
-#   ./leaderboard/aws_alpha.sh deploy-site
-#   ./leaderboard/aws_alpha.sh status
-#   ./leaderboard/aws_alpha.sh collapse
+#   ./leaderboard/aws_alpha.sh up --daplab-project <project> --owner <uni> --daplab-account-id <account>
+#   ./leaderboard/aws_alpha.sh run --daplab-project <project> --owner <uni> --daplab-account-id <account> [--collapse-after]
+#   ./leaderboard/aws_alpha.sh status --daplab-project <project> --owner <uni> --daplab-account-id <account>
+#   ./leaderboard/aws_alpha.sh collapse --daplab-project <project> --owner <uni> --daplab-account-id <account>
 
 set -euo pipefail
 

@@ -531,21 +531,65 @@ class Cli(unittest.TestCase):
 
 
 class AwsAlphaLifecycle(Board):
-    """Verify the collapsible personal-AWS alpha lifecycle (up, deploy-site, status, run, collapse)."""
+    """Verify the collapsible DAPLab AWS alpha lifecycle."""
 
     def setUp(self):
         super().setUp()
         from leaderboard import aws_alpha
         self.aws_alpha = aws_alpha
+        self.identity = aws_alpha.DaplabIdentity(
+            "ai-forking",
+            "ik2619",
+            "123456789012",
+        )
         self.runs = self.board / ".runs"
         self.calls: list[list[str]] = []
         self.cloud = {
+            "account_id": "123456789012",
             "instances": [],
-            "volumes": [{"VolumeId": "vol-0alpha1", "State": "available"}],
+            "volumes": [],
             "sgs": [],
+            "rules": [],
             "keys": [],
             "buckets": set(),
+            "bucket_objects": {},
         }
+
+    @staticmethod
+    def _tag_spec(tokens: list[str], resource_type: str) -> list[dict[str, str]]:
+        prefix = f"ResourceType={resource_type},"
+        spec = next((token for token in tokens if token.startswith(prefix)), "")
+        return [
+            {"Key": key, "Value": value}
+            for key, value in re.findall(r"\{Key=([^,{}]+),Value=([^{}]*)\}", spec)
+        ]
+
+    @staticmethod
+    def _filtered(items: list[dict], tokens: list[str]) -> list[dict]:
+        filters = [token for token in tokens if token.startswith("Name=")]
+
+        def matches(item: dict) -> bool:
+            tags = {
+                tag["Key"]: tag["Value"]
+                for tag in item.get("Tags", [])
+            }
+            fields = {
+                "instance-id": "InstanceId",
+                "volume-id": "VolumeId",
+                "group-id": "GroupId",
+                "group-name": "GroupName",
+                "vpc-id": "VpcId",
+                "key-name": "KeyName",
+            }
+            for item_filter in filters:
+                name, values = item_filter.removeprefix("Name=").split(",Values=", 1)
+                allowed = values.split(",")
+                actual = tags.get(name.removeprefix("tag:")) if name.startswith("tag:") else item.get(fields.get(name, ""))
+                if str(actual or "") not in allowed:
+                    return False
+            return True
+
+        return [item for item in items if matches(item)]
 
     def fake_aws_runner(self, cmd: list[str], **_kwargs):
         import subprocess
@@ -561,28 +605,144 @@ class AwsAlphaLifecycle(Board):
                 i += 1
         svc, op = tokens[0], tokens[1]
         out = ""
+        err = ""
         rc = 0
+        if (
+            svc == "s3api"
+            and "--bucket" in tokens
+            and "--expected-bucket-owner" in tokens
+        ):
+            bucket = tokens[tokens.index("--bucket") + 1]
+            expected_owner = tokens[
+                tokens.index("--expected-bucket-owner") + 1
+            ]
+            actual_owner = self.cloud.get("bucket_owners", {}).get(
+                bucket,
+                self.cloud["account_id"],
+            )
+            if expected_owner != actual_owner:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    stdout="",
+                    stderr=(
+                        "An error occurred (403) because the bucket owner does not "
+                        "match the expected owner"
+                    ),
+                )
         if (svc, op) == ("sts", "get-caller-identity"):
-            out = json.dumps({"Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/dev"})
+            out = json.dumps(
+                {
+                    "Account": self.cloud["account_id"],
+                    "Arn": self.cloud.get(
+                        "caller_arn",
+                        "arn:aws:iam::123456789012:user/ik2619",
+                    ),
+                }
+            )
         elif (svc, op) == ("ssm", "get-parameter"):
             out = "ami-0ubuntu2404amd64"
         elif (svc, op) == ("ec2", "describe-instances"):
-            out = json.dumps({"Reservations": [{"Instances": list(self.cloud["instances"])}]})
+            instances = list(self.cloud["instances"])
+            if "--instance-ids" in tokens:
+                instance_id = tokens[tokens.index("--instance-ids") + 1]
+                instances = [
+                    item for item in instances if item["InstanceId"] == instance_id
+                ]
+            else:
+                instances = self._filtered(instances, tokens)
+            out = json.dumps({"Reservations": [{"Instances": instances}]})
         elif (svc, op) == ("ec2", "describe-volumes"):
-            out = json.dumps({"Volumes": list(self.cloud["volumes"])})
+            out = json.dumps(
+                {"Volumes": self._filtered(list(self.cloud["volumes"]), tokens)}
+            )
         elif (svc, op) == ("ec2", "describe-security-groups"):
-            out = json.dumps({"SecurityGroups": list(self.cloud["sgs"])})
+            out = json.dumps(
+                {"SecurityGroups": self._filtered(list(self.cloud["sgs"]), tokens)}
+            )
         elif (svc, op) == ("ec2", "describe-key-pairs"):
-            out = json.dumps({"KeyPairs": list(self.cloud["keys"])})
+            out = json.dumps(
+                {"KeyPairs": self._filtered(list(self.cloud["keys"]), tokens)}
+            )
+        elif (svc, op) == ("ec2", "describe-security-group-rules"):
+            out = json.dumps(
+                {
+                    "SecurityGroupRules": self._filtered(
+                        list(self.cloud["rules"]),
+                        tokens,
+                    )
+                }
+            )
         elif (svc, op) == ("ec2", "create-key-pair"):
             kname = tokens[tokens.index("--key-name") + 1]
-            self.cloud["keys"].append({"KeyName": kname})
+            self.cloud["keys"].append(
+                {
+                    "KeyName": kname,
+                    "Tags": self._tag_spec(tokens, "key-pair"),
+                }
+            )
             out = json.dumps({"KeyName": kname, "KeyMaterial": "-----BEGIN OPENSSH PRIVATE KEY-----\nalpha\n"})
         elif (svc, op) == ("ec2", "create-security-group"):
             gname = tokens[tokens.index("--group-name") + 1]
             gid = "sg-0alpha123"
-            self.cloud["sgs"].append({"GroupId": gid, "GroupName": gname})
+            group = {
+                "GroupId": gid,
+                "GroupName": gname,
+                "Tags": self._tag_spec(tokens, "security-group"),
+            }
+            if "--vpc-id" in tokens:
+                group["VpcId"] = tokens[tokens.index("--vpc-id") + 1]
+            self.cloud["sgs"].append(group)
+            self.cloud["rules"].append(
+                {
+                    "SecurityGroupRuleId": "sgr-0egress",
+                    "GroupId": gid,
+                    "IsEgress": True,
+                    "IpProtocol": "-1",
+                    "CidrIpv4": "0.0.0.0/0",
+                }
+            )
             out = json.dumps({"GroupId": gid})
+        elif (svc, op) == ("ec2", "authorize-security-group-ingress"):
+            gid = tokens[tokens.index("--group-id") + 1]
+            protocol = tokens[tokens.index("--protocol") + 1]
+            port = int(tokens[tokens.index("--port") + 1])
+            cidr = tokens[tokens.index("--cidr") + 1]
+            duplicate = any(
+                not rule["IsEgress"]
+                and rule["GroupId"] == gid
+                and rule.get("IpProtocol") == protocol
+                and rule.get("FromPort") == port
+                and rule.get("ToPort") == port
+                and rule.get("CidrIpv4") == cidr
+                for rule in self.cloud["rules"]
+            )
+            if duplicate:
+                rc = 1
+                err = "An error occurred (InvalidPermission.Duplicate)"
+            else:
+                self.cloud["rules"].append(
+                    {
+                        "SecurityGroupRuleId": "sgr-0ingress",
+                        "GroupId": gid,
+                        "IsEgress": False,
+                        "IpProtocol": protocol,
+                        "FromPort": port,
+                        "ToPort": port,
+                        "CidrIpv4": cidr,
+                        "Tags": self._tag_spec(tokens, "security-group-rule"),
+                    }
+                )
+        elif (svc, op) == ("ec2", "revoke-security-group-ingress"):
+            rule_id = tokens[tokens.index("--security-group-rule-ids") + 1]
+            self.cloud["rules"] = [
+                rule
+                for rule in self.cloud["rules"]
+                if rule["SecurityGroupRuleId"] != rule_id
+            ]
+        elif (svc, op) == ("ec2", "create-tags"):
+            if self.cloud.get("fail_rule_tagging"):
+                rc = 1
         elif (svc, op) == ("ec2", "run-instances"):
             iid = "i-0alpha999"
             itype = tokens[tokens.index("--instance-type") + 1]
@@ -592,19 +752,37 @@ class AwsAlphaLifecycle(Board):
                     "State": {"Name": "running"},
                     "InstanceType": itype,
                     "PublicIpAddress": "198.51.100.42",
+                    "Tags": self._tag_spec(tokens, "instance"),
+                }
+            )
+            self.cloud["volumes"].append(
+                {
+                    "VolumeId": "vol-0alpha1",
+                    "State": "available",
+                    "Tags": self._tag_spec(tokens, "volume"),
                 }
             )
             out = json.dumps({"Instances": [{"InstanceId": iid}]})
         elif (svc, op) == ("ec2", "terminate-instances"):
+            ids = set(tokens[tokens.index("--instance-ids") + 1 :])
             for inst in self.cloud["instances"]:
-                inst["State"] = {"Name": "terminated"}
+                if inst["InstanceId"] in ids:
+                    inst["State"] = {"Name": "terminated"}
             out = "terminated"
         elif (svc, op) == ("ec2", "delete-volume"):
             vid = tokens[tokens.index("--volume-id") + 1]
-            self.cloud["volumes"] = [v for v in self.cloud["volumes"] if v["VolumeId"] != vid]
+            if vid in self.cloud.get("fail_delete_volumes", set()):
+                rc = 1
+            else:
+                self.cloud["volumes"] = [
+                    v for v in self.cloud["volumes"] if v["VolumeId"] != vid
+                ]
         elif (svc, op) == ("ec2", "delete-security-group"):
             gid = tokens[tokens.index("--group-id") + 1]
             self.cloud["sgs"] = [g for g in self.cloud["sgs"] if g["GroupId"] != gid]
+            self.cloud["rules"] = [
+                rule for rule in self.cloud["rules"] if rule["GroupId"] != gid
+            ]
         elif (svc, op) == ("ec2", "delete-key-pair"):
             kname = tokens[tokens.index("--key-name") + 1]
             self.cloud["keys"] = [k for k in self.cloud["keys"] if k["KeyName"] != kname]
@@ -626,16 +804,57 @@ class AwsAlphaLifecycle(Board):
                 )
             rc = 0
         elif (svc, op) == ("s3api", "list-buckets"):
-            out = json.dumps({"Buckets": [{"Name": b} for b in sorted(self.cloud["buckets"])]})
+            if self.cloud.get("fail_list_buckets"):
+                rc = 1
+                err = "list buckets unavailable"
+            else:
+                prefix = (
+                    tokens[tokens.index("--prefix") + 1]
+                    if "--prefix" in tokens
+                    else ""
+                )
+                out = json.dumps(
+                    {
+                        "Buckets": [
+                            {"Name": bucket}
+                            for bucket in sorted(self.cloud["buckets"])
+                            if bucket.startswith(prefix)
+                        ]
+                    }
+                )
+        elif (svc, op) == ("s3api", "get-bucket-location"):
+            bname = tokens[tokens.index("--bucket") + 1]
+            if bname not in self.cloud["buckets"]:
+                rc = 1
+            else:
+                region = self.cloud.get("bucket_regions", {}).get(
+                    bname,
+                    "us-east-1",
+                )
+                out = json.dumps(
+                    {
+                        "LocationConstraint": (
+                            None if region == "us-east-1" else region
+                        )
+                    }
+                )
         elif (svc, op) == ("s3api", "create-bucket"):
             bname = tokens[tokens.index("--bucket") + 1]
             self.cloud["buckets"].add(bname)
-            self.cloud.setdefault("bucket_tags", {})[bname] = [
-                {"Key": "Project", "Value": "BranchBenchLeaderboard"},
-                {"Key": "Phase", "Value": "alpha"},
-                {"Key": "Stack", "Value": "branchbench-alpha"},
+            self.cloud.setdefault("bucket_owners", {})[bname] = self.cloud[
+                "account_id"
             ]
+            self.cloud["bucket_objects"].setdefault(bname, set())
             out = json.dumps({"Location": f"/{bname}"})
+        elif (svc, op) == ("s3api", "put-bucket-tagging"):
+            bname = tokens[tokens.index("--bucket") + 1]
+            if bname in self.cloud.get("fail_bucket_tagging", set()):
+                rc = 1
+            else:
+                tagging = tokens[tokens.index("--tagging") + 1]
+                self.cloud.setdefault("bucket_tags", {})[bname] = json.loads(tagging)[
+                    "TagSet"
+                ]
         elif (svc, op) == ("s3api", "get-bucket-tagging"):
             bname = tokens[tokens.index("--bucket") + 1]
             tags = self.cloud.get("bucket_tags", {}).get(bname)
@@ -643,25 +862,65 @@ class AwsAlphaLifecycle(Board):
                 rc = 1
             else:
                 out = json.dumps({"TagSet": tags})
+        elif (svc, op) == ("s3api", "list-objects-v2"):
+            bname = tokens[tokens.index("--bucket") + 1]
+            out = json.dumps(
+                {
+                    "Contents": [
+                        {"Key": key}
+                        for key in sorted(
+                            self.cloud["bucket_objects"].get(bname, set())
+                        )
+                    ]
+                }
+            )
+        elif (svc, op) == ("s3api", "put-object"):
+            bname = tokens[tokens.index("--bucket") + 1]
+            key = tokens[tokens.index("--key") + 1]
+            self.cloud["bucket_objects"].setdefault(bname, set()).add(key)
+            out = json.dumps({"ETag": '"fake"'})
         elif (svc, op) == ("s3api", "list-object-versions"):
-            out = json.dumps({"Versions": [{"Key": "index.html", "VersionId": "v1"}], "DeleteMarkers": []})
+            bname = tokens[tokens.index("--bucket") + 1]
+            out = json.dumps(
+                {
+                    "Versions": [
+                        {"Key": key, "VersionId": "null"}
+                        for key in sorted(
+                            self.cloud["bucket_objects"].get(bname, set())
+                        )
+                    ],
+                    "DeleteMarkers": [],
+                }
+            )
+        elif (svc, op) == ("s3api", "delete-objects"):
+            bname = tokens[tokens.index("--bucket") + 1]
+            payload = json.loads(tokens[tokens.index("--delete") + 1])
+            for item in payload.get("Objects", []):
+                self.cloud["bucket_objects"].setdefault(bname, set()).discard(
+                    item["Key"]
+                )
+            out = json.dumps({"Deleted": payload.get("Objects", [])})
         elif (svc, op) == ("s3api", "delete-bucket"):
             bname = tokens[tokens.index("--bucket") + 1]
             if bname in self.cloud.get("fail_delete_buckets", set()):
                 rc = 1
+            elif self.cloud["bucket_objects"].get(bname):
+                rc = 1
             else:
                 self.cloud["buckets"].discard(bname)
+                self.cloud["bucket_objects"].pop(bname, None)
+                self.cloud.get("bucket_owners", {}).pop(bname, None)
         elif (svc, op) == ("s3", "presign"):
             out = "https://s3.amazonaws.com/presigned/index.html"
-        return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr="")
+        return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr=err)
 
     def test_up_deploy_status_and_collapse_tear_down_all_resources(self):
         self.write(self.payload())
         aws = self.aws_alpha.AwsCli(region="us-east-1", runner=self.fake_aws_runner)
         state = self.aws_alpha.up_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
-            instance_type="i4i.2xlarge",
             spot=True,
             runs_dir=self.runs,
             http_getter=lambda _url: "203.0.113.9\n",
@@ -669,30 +928,121 @@ class AwsAlphaLifecycle(Board):
         self.assertEqual(state["phase"], "alpha")
         self.assertEqual(state["instance_id"], "i-0alpha999")
         self.assertEqual(state["ssh_cidr"], "203.0.113.9/32")
-        self.assertEqual(state["bucket"], "branchbench-alpha-123456789012-us-east-1")
+        self.assertEqual(
+            state["bucket"],
+            "ai-forking-ik2619-branchbench-alpha-site-123456789012-us-east-1",
+        )
+        self.assertEqual(state["instance_type"], "t3a.xlarge")
+        self.assertEqual(state["daplab_project"], "ai-forking")
+        self.assertEqual(state["billing_tag1"], "ik2619")
         self.assertTrue((self.runs / "aws_alpha_state.json").is_file())
         self.assertTrue((self.runs / "branchbench-alpha.pem").is_file())
+        run_call = next(call for call in self.calls if "run-instances" in call)
+        self.assertEqual(
+            run_call[run_call.index("--instance-type") + 1], "t3a.xlarge"
+        )
+        self.assertEqual(
+            run_call[run_call.index("--credit-specification") + 1],
+            "CpuCredits=standard",
+        )
+        self.assertEqual(
+            run_call[
+                run_call.index("--instance-initiated-shutdown-behavior") + 1
+            ],
+            "terminate",
+        )
+        block_devices = json.loads(
+            run_call[run_call.index("--block-device-mappings") + 1]
+        )
+        self.assertEqual(block_devices[0]["Ebs"]["VolumeSize"], 64)
+        self.assertTrue(block_devices[0]["Ebs"]["Encrypted"])
+        tag_specs = [part for part in run_call if part.startswith("ResourceType=")]
+        self.assertEqual(
+            {spec.split(",", 1)[0] for spec in tag_specs},
+            {
+                "ResourceType=instance",
+                "ResourceType=volume",
+                "ResourceType=network-interface",
+                "ResourceType=spot-instances-request",
+            },
+        )
+        for call in self.calls:
+            for spec in (part for part in call if part.startswith("ResourceType=")):
+                self.assertIn("{Key=project,Value=ai-forking}", spec)
+                self.assertIn("{Key=billing-tag1,Value=ik2619}", spec)
+                self.assertIn("Value=ai-forking-ik2619-", spec)
+        self.assertIn(
+            {"Key": "project", "Value": "ai-forking"},
+            self.cloud["bucket_tags"][state["bucket"]],
+        )
+        self.assertIn(
+            {"Key": "billing-tag1", "Value": "ik2619"},
+            self.cloud["bucket_tags"][state["bucket"]],
+        )
+        self.assertTrue(
+            any("put-bucket-encryption" in call for call in self.calls),
+            "alpha buckets must explicitly enable encryption at rest",
+        )
+        ingress_call = next(
+            call for call in self.calls if "authorize-security-group-ingress" in call
+        )
+        ingress_tags = ingress_call[
+            ingress_call.index("--tag-specifications") + 1
+        ]
+        self.assertIn("ResourceType=security-group-rule", ingress_tags)
+        self.assertIn("{Key=project,Value=ai-forking}", ingress_tags)
+        self.assertIn("{Key=billing-tag1,Value=ik2619}", ingress_tags)
+        rule_tag_calls = [call for call in self.calls if "create-tags" in call]
+        self.assertEqual(len(rule_tag_calls), 2)
+        for call in rule_tag_calls:
+            self.assertIn("Key=project,Value=ai-forking", call)
+            self.assertIn("Key=billing-tag1,Value=ik2619", call)
+        filtered_describes = [
+            call
+            for call in self.calls
+            if "--filters" in call
+            and any(
+                operation in call
+                for operation in (
+                    "describe-instances",
+                    "describe-volumes",
+                    "describe-security-groups",
+                    "describe-key-pairs",
+                )
+            )
+        ]
+        self.assertTrue(filtered_describes)
+        for call in filtered_describes:
+            self.assertIn("Name=tag:project,Values=ai-forking", call)
+            self.assertIn("Name=tag:billing-tag1,Values=ik2619", call)
 
         # Duplicate `up` while active refuses to leak a second instance
         with self.assertRaisesRegex(self.aws_alpha.AlphaError, "already has an EC2 instance"):
             self.aws_alpha.up_alpha(
                 aws=aws,
+                identity=self.identity,
                 stack="branchbench-alpha",
                 runs_dir=self.runs,
                 http_getter=lambda _url: "203.0.113.9",
             )
 
+        self.cloud["bucket_objects"][state["bucket"]].add("stale.txt")
         deployed = self.aws_alpha.deploy_alpha_site(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             board=self.board,
             runs_dir=self.runs,
         )
         self.assertTrue((self.site / "alpha" / "index.html").is_file())
-        self.assertEqual(deployed["bucket"], "branchbench-alpha-123456789012-us-east-1")
+        self.assertEqual(deployed["bucket"], state["bucket"])
+        self.assertIn("index.html", self.cloud["bucket_objects"][state["bucket"]])
+        self.assertNotIn("stale.txt", self.cloud["bucket_objects"][state["bucket"]])
+        self.assertFalse(any("sync" in call for call in self.calls))
 
         active_status = self.aws_alpha.status_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             board=self.board,
             runs_dir=self.runs,
@@ -703,6 +1053,7 @@ class AwsAlphaLifecycle(Board):
         (self.runs / "aws_alpha_state.json").unlink()
         collapsed = self.aws_alpha.collapse_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             board=self.board,
             runs_dir=self.runs,
@@ -711,19 +1062,595 @@ class AwsAlphaLifecycle(Board):
         self.assertEqual(collapsed["terminated_instances"], ["i-0alpha999"])
         self.assertEqual(collapsed["deleted_volumes"], ["vol-0alpha1"])
         self.assertEqual(collapsed["deleted_security_groups"], ["sg-0alpha123"])
-        self.assertEqual(collapsed["deleted_bucket"], "branchbench-alpha-123456789012-us-east-1")
+        self.assertEqual(collapsed["deleted_bucket"], state["bucket"])
         self.assertEqual(collapsed["ongoing_aws_cost"], "$0.00/hr")
         self.assertFalse((self.site / "alpha").exists())
         self.assertFalse((self.runs / "aws_alpha_state.json").exists())
         self.assertFalse((self.runs / "branchbench-alpha.pem").exists())
+        for call in self.calls:
+            if (
+                "s3api" in call
+                and "--bucket" in call
+                and "create-bucket" not in call
+            ):
+                self.assertIn("--expected-bucket-owner", call)
+                self.assertEqual(
+                    call[call.index("--expected-bucket-owner") + 1],
+                    self.identity.account_id,
+                )
 
         final_status = self.aws_alpha.status_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             board=self.board,
             runs_dir=self.runs,
         )
         self.assertTrue(final_status["collapsed"])
+
+    def test_daplab_identity_region_state_and_bucket_creation_fail_closed(self):
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "--daplab-project"):
+            self.aws_alpha.DaplabIdentity(
+                "bad project",
+                "ik2619",
+                "123456789012",
+            )
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "--daplab-account-id"):
+            self.aws_alpha.DaplabIdentity("ai-forking", "ik2619", "bad")
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "IAM user"):
+            self.aws_alpha.verify_caller_owner(
+                {
+                    "account_id": "123456789012",
+                    "arn": "arn:aws:iam::123456789012:user/another-user",
+                },
+                self.identity,
+            )
+
+        east = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+        self.cloud["account_id"] = "999999999999"
+        self.cloud["caller_arn"] = "arn:aws:iam::999999999999:user/ik2619"
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "daplab-account-id"):
+            self.aws_alpha.up_alpha(
+                aws=east,
+                identity=self.identity,
+                ssh_cidr="203.0.113.9/32",
+                runs_dir=self.runs,
+            )
+        self.assertFalse(
+            any(
+                operation in call
+                for call in self.calls
+                for operation in (
+                    "create-key-pair",
+                    "create-security-group",
+                    "create-bucket",
+                    "run-instances",
+                )
+            )
+        )
+        self.cloud["account_id"] = self.identity.account_id
+        self.cloud["caller_arn"] = (
+            "arn:aws:iam::123456789012:user/ik2619"
+        )
+        self.calls.clear()
+
+        west = self.aws_alpha.AwsCli(
+            region="us-west-2",
+            dry_run=True,
+            runner=self.fake_aws_runner,
+        )
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "locked to us-east-1"):
+            self.aws_alpha.up_alpha(
+                aws=west,
+                identity=self.identity,
+                ssh_cidr="203.0.113.9/32",
+                runs_dir=self.runs,
+            )
+
+        bad_state = {
+            "daplab_project": "another-project",
+            "billing_tag1": "ik2619",
+        }
+        self.aws_alpha.save_state(bad_state, self.runs)
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "does not match"):
+            self.aws_alpha.status_alpha(
+                aws=east,
+                identity=self.identity,
+                runs_dir=self.runs,
+                board=self.board,
+            )
+        self.aws_alpha.state_file_path(self.runs).unlink()
+
+        aws = east
+        bucket = self.aws_alpha.default_bucket_name(
+            "branchbench-alpha",
+            "123456789012",
+            "us-east-1",
+            self.identity,
+        )
+        self.cloud.setdefault("fail_bucket_tagging", set()).add(bucket)
+        with self.assertRaises(self.aws_alpha.AlphaError):
+            self.aws_alpha.up_alpha(
+                aws=aws,
+                identity=self.identity,
+                runs_dir=self.runs,
+                http_getter=lambda _url: "203.0.113.9",
+            )
+        self.assertNotIn(bucket, self.cloud["buckets"])
+
+    def test_live_commands_reject_a_caller_other_than_owner(self):
+        self.aws_alpha.save_state(
+            {
+                "phase": "alpha",
+                "stack": "branchbench-alpha",
+                "daplab_project": self.identity.project,
+                "billing_tag1": self.identity.owner,
+                "region": "us-east-1",
+                "account_id": "123456789012",
+            },
+            self.runs,
+        )
+        self.cloud["caller_arn"] = (
+            "arn:aws:iam::123456789012:user/another-user"
+        )
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+        commands = {
+            "run": lambda: self.aws_alpha.run_alpha_benchmarks(
+                aws=aws,
+                identity=self.identity,
+                board=self.board,
+                runs_dir=self.runs,
+            ),
+            "deploy-site": lambda: self.aws_alpha.deploy_alpha_site(
+                aws=aws,
+                identity=self.identity,
+                board=self.board,
+                runs_dir=self.runs,
+            ),
+            "status": lambda: self.aws_alpha.status_alpha(
+                aws=aws,
+                identity=self.identity,
+                board=self.board,
+                runs_dir=self.runs,
+            ),
+            "collapse": lambda: self.aws_alpha.collapse_alpha(
+                aws=aws,
+                identity=self.identity,
+                board=self.board,
+                runs_dir=self.runs,
+            ),
+        }
+        for command, invoke in commands.items():
+            with self.subTest(command=command):
+                self.calls.clear()
+                with self.assertRaisesRegex(self.aws_alpha.AlphaError, "IAM user"):
+                    invoke()
+                self.assertTrue(
+                    any("get-caller-identity" in call for call in self.calls)
+                )
+                self.assertFalse(
+                    any(
+                        operation in call
+                        for call in self.calls
+                        for operation in (
+                            "terminate-instances",
+                            "delete-security-group",
+                            "delete-key-pair",
+                            "delete-bucket",
+                            "sync",
+                        )
+                    )
+                )
+
+    def test_collapse_ignores_unverified_state_resource_references(self):
+        foreign_file = self.board / "must-not-delete.pem"
+        foreign_file.write_text("foreign", encoding="utf-8")
+        foreign_bucket = "ai-forking-ik2619-foreign-production"
+        foreign_tags = [
+            {"Key": "project", "Value": "another-project"},
+            {"Key": "billing-tag1", "Value": "another-user"},
+            {"Key": "Project", "Value": "OtherApp"},
+            {"Key": "Phase", "Value": "prod"},
+        ]
+        self.cloud.update(
+            {
+                "instances": [
+                    {
+                        "InstanceId": "i-foreign",
+                        "State": {"Name": "running"},
+                        "InstanceType": "m7a.2xlarge",
+                        "PublicIpAddress": "198.51.100.200",
+                        "Tags": foreign_tags,
+                    }
+                ],
+                "volumes": [],
+                "sgs": [
+                    {
+                        "GroupId": "sg-foreign",
+                        "GroupName": "foreign-production-sg",
+                        "Tags": foreign_tags,
+                    }
+                ],
+                "keys": [
+                    {
+                        "KeyName": "foreign-production-key",
+                        "Tags": foreign_tags,
+                    }
+                ],
+                "buckets": {foreign_bucket},
+            }
+        )
+        self.cloud.setdefault("bucket_tags", {})[foreign_bucket] = foreign_tags
+        self.aws_alpha.save_state(
+            {
+                "phase": "alpha",
+                "stack": "branchbench-alpha",
+                "daplab_project": self.identity.project,
+                "billing_tag1": self.identity.owner,
+                "region": "us-east-1",
+                "account_id": "123456789012",
+                "instance_id": "i-foreign",
+                "security_group_id": "sg-foreign",
+                "key_name": "foreign-production-key",
+                "key_path": str(foreign_file),
+                "bucket": foreign_bucket,
+            },
+            self.runs,
+        )
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+
+        collapsed = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            board=self.board,
+            runs_dir=self.runs,
+        )
+
+        self.assertFalse(collapsed["collapsed"])
+        self.assertEqual(collapsed["terminated_instances"], [])
+        self.assertEqual(collapsed["deleted_security_groups"], [])
+        self.assertEqual(collapsed["deleted_key_pairs"], [])
+        self.assertEqual(collapsed["deleted_buckets"], [])
+        self.assertEqual(
+            collapsed["unverified_resources"],
+            [
+                {"type": "instance", "id": "i-foreign"},
+                {"type": "security_group", "id": "sg-foreign"},
+                {"type": "key_pair", "id": "foreign-production-key"},
+            ],
+        )
+        self.assertIn(foreign_bucket, collapsed["remaining_buckets"])
+        self.assertTrue(foreign_file.is_file())
+        self.assertIn(foreign_bucket, self.cloud["buckets"])
+        retained = self.aws_alpha.load_state(self.runs)
+        self.assertEqual(retained["instance_id"], "i-foreign")
+        self.assertEqual(retained["security_group_id"], "sg-foreign")
+        self.assertEqual(retained["key_name"], "foreign-production-key")
+        for operation in (
+            "terminate-instances",
+            "delete-security-group",
+            "delete-key-pair",
+            "delete-bucket",
+        ):
+            self.assertFalse(any(operation in call for call in self.calls))
+
+    def test_collapse_rejects_wrong_region_and_account_before_deletion(self):
+        state = {
+            "phase": "alpha",
+            "stack": "branchbench-alpha",
+            "daplab_project": self.identity.project,
+            "billing_tag1": self.identity.owner,
+            "region": "us-west-2",
+            "account_id": "123456789012",
+        }
+        self.aws_alpha.save_state(state, self.runs)
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "us-west-2"):
+            self.aws_alpha.collapse_alpha(
+                aws=aws,
+                identity=self.identity,
+                board=self.board,
+                runs_dir=self.runs,
+            )
+        self.assertFalse(any("delete-" in part for call in self.calls for part in call))
+
+        state["region"] = "us-east-1"
+        state["account_id"] = self.identity.account_id
+        self.aws_alpha.save_state(state, self.runs)
+        self.cloud["account_id"] = "999999999999"
+        self.cloud["caller_arn"] = "arn:aws:iam::999999999999:user/ik2619"
+        self.calls.clear()
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "daplab-account-id"):
+            self.aws_alpha.collapse_alpha(
+                aws=aws,
+                identity=self.identity,
+                board=self.board,
+                runs_dir=self.runs,
+            )
+        self.assertTrue(any("get-caller-identity" in call for call in self.calls))
+        self.assertFalse(any("delete-" in part for call in self.calls for part in call))
+
+    def test_state_loss_partial_collapse_can_retry(self):
+        self.cloud["volumes"] = [
+            {
+                "VolumeId": "vol-0alpha1",
+                "State": "available",
+                "Tags": self.aws_alpha.resource_tags(
+                    "branchbench-alpha",
+                    self.identity,
+                    self.identity.resource_name("branchbench-alpha-root"),
+                ),
+            }
+        ]
+        volume_id = self.cloud["volumes"][0]["VolumeId"]
+        self.cloud["fail_delete_volumes"] = {volume_id}
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+
+        partial = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            board=self.board,
+            runs_dir=self.runs,
+        )
+
+        self.assertFalse(partial["collapsed"])
+        recovered = self.aws_alpha.load_state(self.runs)
+        self.assertEqual(recovered["daplab_project"], self.identity.project)
+        self.assertEqual(recovered["billing_tag1"], self.identity.owner)
+        self.cloud["fail_delete_volumes"].clear()
+
+        retried = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            board=self.board,
+            runs_dir=self.runs,
+        )
+        self.assertTrue(retried["collapsed"])
+        self.assertFalse(self.aws_alpha.state_file_path(self.runs).exists())
+
+    def test_state_loss_does_not_delete_bucket_from_another_region(self):
+        bucket = "ai-forking-ik2619-branchbench-alpha-site-west"
+        self.cloud.update(
+            {
+                "instances": [],
+                "volumes": [],
+                "sgs": [],
+                "keys": [],
+                "buckets": {bucket},
+                "bucket_regions": {bucket: "us-west-2"},
+            }
+        )
+        self.cloud.setdefault("bucket_tags", {})[bucket] = [
+            {"Key": "project", "Value": self.identity.project},
+            {"Key": "billing-tag1", "Value": self.identity.owner},
+            {"Key": "Project", "Value": "BranchBenchLeaderboard"},
+            {"Key": "Phase", "Value": "alpha"},
+            {"Key": "Stack", "Value": "branchbench-alpha"},
+        ]
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+
+        result = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            board=self.board,
+            runs_dir=self.runs,
+        )
+
+        self.assertFalse(result["collapsed"])
+        self.assertEqual(
+            result["wrong_region_buckets"],
+            [{"bucket": bucket, "region": "us-west-2"}],
+        )
+        self.assertIn(bucket, self.cloud["buckets"])
+        self.assertFalse(any("delete-bucket" in call for call in self.calls))
+
+    def test_state_loss_ignores_unrelated_shared_account_resources(self):
+        unrelated_bucket = "another-project-someone-production-data"
+        foreign_tags = [
+            {"Key": "project", "Value": "another-project"},
+            {"Key": "billing-tag1", "Value": "another-user"},
+            {"Key": "Project", "Value": "OtherApp"},
+            {"Key": "Phase", "Value": "prod"},
+            {"Key": "Stack", "Value": "production"},
+        ]
+        self.cloud.update(
+            {
+                "instances": [
+                    {
+                        "InstanceId": "i-foreign",
+                        "State": {"Name": "running"},
+                        "InstanceType": "m7a.2xlarge",
+                        "PublicIpAddress": "198.51.100.200",
+                        "Tags": foreign_tags,
+                    }
+                ],
+                "volumes": [
+                    {
+                        "VolumeId": "vol-foreign",
+                        "State": "available",
+                        "Tags": foreign_tags,
+                    }
+                ],
+                "sgs": [
+                    {
+                        "GroupId": "sg-foreign",
+                        "GroupName": "another-project-production",
+                        "Tags": foreign_tags,
+                    }
+                ],
+                "keys": [
+                    {
+                        "KeyName": "another-project-production",
+                        "Tags": foreign_tags,
+                    }
+                ],
+                "buckets": {unrelated_bucket},
+            }
+        )
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+
+        result = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            board=self.board,
+            runs_dir=self.runs,
+        )
+
+        self.assertTrue(result["collapsed"])
+        self.assertEqual(self.cloud["instances"][0]["State"]["Name"], "running")
+        self.assertEqual(self.cloud["volumes"][0]["VolumeId"], "vol-foreign")
+        self.assertEqual(self.cloud["sgs"][0]["GroupId"], "sg-foreign")
+        self.assertEqual(self.cloud["keys"][0]["KeyName"], "another-project-production")
+        self.assertIn(unrelated_bucket, self.cloud["buckets"])
+        list_call = next(call for call in self.calls if "list-buckets" in call)
+        self.assertEqual(
+            list_call[list_call.index("--prefix") + 1],
+            f"{self.identity.name_prefix}-",
+        )
+        self.assertFalse(
+            any(
+                unrelated_bucket in call
+                and (
+                    "get-bucket-location" in call
+                    or "get-bucket-tagging" in call
+                    or "delete-bucket" in call
+                )
+                for call in self.calls
+            )
+        )
+
+    def test_bucket_discovery_uses_the_owner_prefix_and_fails_closed(self):
+        bucket = "ai-forking-ik2619-orphan-alpha-site"
+        self.cloud["buckets"] = {bucket}
+        self.cloud.setdefault("bucket_tags", {})[bucket] = (
+            self.aws_alpha.resource_tags(
+                "branchbench-alpha",
+                self.identity,
+                bucket,
+            )
+        )
+        self.aws_alpha.save_state(
+            {
+                "phase": "alpha",
+                "stack": "branchbench-alpha",
+                "daplab_project": self.identity.project,
+                "billing_tag1": self.identity.owner,
+                "account_id": self.identity.account_id,
+                "region": "us-east-1",
+                "bucket": "",
+            },
+            self.runs,
+        )
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+
+        recovered = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            board=self.board,
+            runs_dir=self.runs,
+        )
+
+        self.assertTrue(recovered["collapsed"])
+        self.assertEqual(recovered["deleted_buckets"], [bucket])
+        list_call = next(call for call in self.calls if "list-buckets" in call)
+        self.assertEqual(
+            list_call[list_call.index("--prefix") + 1],
+            f"{self.identity.name_prefix}-",
+        )
+
+        self.calls.clear()
+        self.cloud["fail_list_buckets"] = True
+        unresolved = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            keep_bucket=True,
+            board=self.board,
+            runs_dir=self.runs,
+        )
+        self.assertFalse(unresolved["collapsed"])
+        self.assertEqual(
+            unresolved["ongoing_aws_cost"],
+            "partial (see remaining resources)",
+        )
+        self.assertTrue(self.aws_alpha.state_file_path(self.runs).is_file())
+
+    def test_reused_security_group_replaces_stale_ssh_cidr(self):
+        stack = "branchbench-alpha"
+        group_id = "sg-0alpha123"
+        self.cloud["sgs"] = [
+            {
+                "GroupId": group_id,
+                "GroupName": self.identity.resource_name(f"{stack}-sg"),
+                "Tags": self.aws_alpha.resource_tags(
+                    stack,
+                    self.identity,
+                    self.identity.resource_name(f"{stack}-sg"),
+                ),
+            }
+        ]
+        self.cloud["rules"] = [
+            {
+                "SecurityGroupRuleId": "sgr-egress",
+                "GroupId": group_id,
+                "IsEgress": True,
+                "IpProtocol": "-1",
+                "CidrIpv4": "0.0.0.0/0",
+            },
+            {
+                "SecurityGroupRuleId": "sgr-stale",
+                "GroupId": group_id,
+                "IsEgress": False,
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "CidrIpv4": "198.51.100.1/32",
+            },
+        ]
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+
+        returned_id = self.aws_alpha.ensure_security_group(
+            aws,
+            stack,
+            self.identity,
+            "203.0.113.9/32",
+        )
+
+        self.assertEqual(returned_id, group_id)
+        ingress = [rule for rule in self.cloud["rules"] if not rule["IsEgress"]]
+        self.assertEqual(len(ingress), 1)
+        self.assertEqual(ingress[0]["CidrIpv4"], "203.0.113.9/32")
+        revoke = next(
+            call for call in self.calls if "revoke-security-group-ingress" in call
+        )
+        self.assertIn("sgr-stale", revoke)
 
     def test_run_with_collapse_after_pulls_results_builds_alpha_site_and_collapses_aws(self):
         import subprocess
@@ -731,10 +1658,17 @@ class AwsAlphaLifecycle(Board):
         aws = self.aws_alpha.AwsCli(region="us-east-1", runner=self.fake_aws_runner)
         self.aws_alpha.up_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             runs_dir=self.runs,
             http_getter=lambda _url: "203.0.113.9",
         )
+        unrelated_key = self.board / "must-not-use.pem"
+        unrelated_key.write_text("foreign", encoding="utf-8")
+        state = self.aws_alpha.load_state(self.runs)
+        state["public_ip"] = "203.0.113.250"
+        state["key_path"] = str(unrelated_key)
+        self.aws_alpha.save_state(state, self.runs)
         ssh_rsync_calls = []
 
         def fake_cmd_runner(cmd: list[str], **_kwargs):
@@ -743,6 +1677,7 @@ class AwsAlphaLifecycle(Board):
 
         rc = self.aws_alpha.run_alpha_benchmarks(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             preset="mini",
             systems="dolt dolt_mysql",
@@ -757,25 +1692,135 @@ class AwsAlphaLifecycle(Board):
         self.assertFalse((self.runs / "aws_alpha_state.json").exists(), "AWS state is collapsed after the run")
         self.assertEqual(self.cloud["sgs"], [])
         self.assertEqual(self.cloud["buckets"], set())
+        rendered_calls = "\n".join(" ".join(call) for call in ssh_rsync_calls)
+        self.assertIn("198.51.100.42", rendered_calls)
+        self.assertNotIn("203.0.113.250", rendered_calls)
+        self.assertNotIn(str(unrelated_key), rendered_calls)
+        self.assertTrue(unrelated_key.is_file())
+
+    def test_run_rejects_a_state_instance_without_stack_ownership(self):
+        import subprocess
+
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+        self.aws_alpha.up_alpha(
+            aws=aws,
+            identity=self.identity,
+            stack="branchbench-alpha",
+            runs_dir=self.runs,
+            http_getter=lambda _url: "203.0.113.9",
+        )
+        self.cloud["instances"].append(
+            {
+                "InstanceId": "i-foreign",
+                "State": {"Name": "running"},
+                "InstanceType": "t3a.xlarge",
+                "PublicIpAddress": "198.51.100.200",
+                "Tags": [{"Key": "Project", "Value": "OtherApp"}],
+            }
+        )
+        state = self.aws_alpha.load_state(self.runs)
+        state["instance_id"] = "i-foreign"
+        self.aws_alpha.save_state(state, self.runs)
+        commands: list[list[str]] = []
+
+        def record_command(cmd: list[str], **_kwargs):
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "not owned"):
+            self.aws_alpha.run_alpha_benchmarks(
+                aws=aws,
+                identity=self.identity,
+                board=self.board,
+                runs_dir=self.runs,
+                cmd_runner=record_command,
+            )
+        self.assertEqual(commands, [])
 
     def test_foreign_or_untagged_bucket_is_refused(self):
         aws = self.aws_alpha.AwsCli(region="us-east-1", runner=self.fake_aws_runner)
-        self.cloud["buckets"].add("foreign-prod-bucket")
-        self.cloud.setdefault("bucket_tags", {})["foreign-prod-bucket"] = [
+        foreign_bucket = "ai-forking-ik2619-foreign-prod-bucket"
+        self.cloud["buckets"].add(foreign_bucket)
+        self.cloud.setdefault("bucket_tags", {})[foreign_bucket] = [
             {"Key": "Project", "Value": "OtherApp"},
             {"Key": "Phase", "Value": "prod"},
         ]
         with self.assertRaisesRegex(self.aws_alpha.AlphaError, "refusing to modify or delete pre-existing S3 bucket"):
             self.aws_alpha.up_alpha(
                 aws=aws,
+                identity=self.identity,
                 stack="branchbench-alpha",
-                bucket="foreign-prod-bucket",
+                bucket=foreign_bucket,
                 runs_dir=self.runs,
                 http_getter=lambda _url: "203.0.113.9",
             )
-        self.assertIn("foreign-prod-bucket", self.cloud["buckets"])
+        self.assertIn(foreign_bucket, self.cloud["buckets"])
 
-    def test_collapse_after_runs_on_failure_and_stdin_carries_secrets(self):
+    def test_matching_bucket_tags_do_not_bypass_account_ownership(self):
+        bucket = "ai-forking-ik2619-cross-account-alpha-site"
+        self.cloud["buckets"].add(bucket)
+        self.cloud.setdefault("bucket_owners", {})[bucket] = "999999999999"
+        self.cloud.setdefault("bucket_tags", {})[bucket] = (
+            self.aws_alpha.resource_tags(
+                "branchbench-alpha",
+                self.identity,
+                bucket,
+            )
+        )
+        aws = self.aws_alpha.AwsCli(
+            region="us-east-1",
+            runner=self.fake_aws_runner,
+        )
+
+        with self.assertRaisesRegex(self.aws_alpha.AlphaError, "403|owner"):
+            self.aws_alpha.ensure_bucket(
+                aws,
+                "branchbench-alpha",
+                bucket,
+                self.identity,
+            )
+        self.assertFalse(
+            any(
+                operation in call
+                for call in self.calls
+                for operation in (
+                    "put-bucket-tagging",
+                    "put-bucket-encryption",
+                    "put-object",
+                    "delete-objects",
+                    "delete-bucket",
+                )
+            )
+        )
+
+        self.aws_alpha.save_state(
+            {
+                "phase": "alpha",
+                "stack": "branchbench-alpha",
+                "daplab_project": self.identity.project,
+                "billing_tag1": self.identity.owner,
+                "account_id": self.identity.account_id,
+                "region": "us-east-1",
+                "bucket": bucket,
+            },
+            self.runs,
+        )
+        self.calls.clear()
+        result = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            board=self.board,
+            runs_dir=self.runs,
+        )
+        self.assertFalse(result["collapsed"])
+        self.assertEqual(result["unverified_buckets"], [bucket])
+        self.assertIn(bucket, self.cloud["buckets"])
+        self.assertFalse(any("delete-bucket" in call for call in self.calls))
+
+    def test_pull_failure_preserves_worker_and_stdin_carries_secrets(self):
         import os
         import subprocess
         from unittest import mock
@@ -784,6 +1829,7 @@ class AwsAlphaLifecycle(Board):
         aws = self.aws_alpha.AwsCli(region="us-east-1", runner=self.fake_aws_runner)
         self.aws_alpha.up_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             runs_dir=self.runs,
             http_getter=lambda _url: "203.0.113.9",
@@ -797,9 +1843,13 @@ class AwsAlphaLifecycle(Board):
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         with mock.patch.dict(os.environ, {"NEON_API_KEY_ORG": "super-secret-neon-key"}):
-            with self.assertRaisesRegex(self.aws_alpha.AlphaError, "failed to pull results"):
+            with self.assertRaisesRegex(
+                self.aws_alpha.AlphaError,
+                "failed to pull results.*dead-man shutdown remains armed",
+            ):
                 self.aws_alpha.run_alpha_benchmarks(
                     aws=aws,
+                    identity=self.identity,
                     stack="branchbench-alpha",
                     preset="mini",
                     lane="macro",
@@ -813,26 +1863,46 @@ class AwsAlphaLifecycle(Board):
         self.assertIn("--lane macro", " ".join(ssh_cmd))
         self.assertNotIn("super-secret-neon-key", " ".join(ssh_cmd), "secret must not appear in ssh argv")
         self.assertIn("super-secret-neon-key", ssh_kwargs.get("input", ""), "secret is passed via ssh stdin")
-        self.assertFalse((self.runs / "aws_alpha_state.json").exists(), "collapse_after ran in finally despite pull failure")
-        self.assertEqual(self.cloud["sgs"], [])
-        self.assertEqual(self.cloud["buckets"], set())
+        self.assertTrue(
+            (self.runs / "aws_alpha_state.json").exists(),
+            "failed artifact download must retain state for recovery",
+        )
+        self.assertEqual(self.cloud["instances"][0]["State"]["Name"], "running")
+        self.assertNotEqual(self.cloud["sgs"], [])
+        self.assertNotEqual(self.cloud["buckets"], set())
+        self.assertFalse(
+            any("terminate-instances" in call for call in self.calls),
+            "failed artifact download must not destroy the only artifact copy",
+        )
 
     def test_head_bucket_403_fails_closed_and_partial_collapse_retains_state_and_Sync_excludes_untracked(self):
         import subprocess
         aws = self.aws_alpha.AwsCli(region="us-east-1", runner=self.fake_aws_runner)
-        self.cloud.setdefault("forbidden_buckets", set()).add("forbidden-bucket")
+        forbidden_bucket = "ai-forking-ik2619-forbidden-bucket"
+        self.cloud.setdefault("forbidden_buckets", set()).add(forbidden_bucket)
         with self.assertRaisesRegex(self.aws_alpha.AlphaError, "403|Forbidden"):
             self.aws_alpha.up_alpha(
                 aws=aws,
+                identity=self.identity,
                 stack="branchbench-alpha",
-                bucket="forbidden-bucket",
+                bucket=forbidden_bucket,
                 runs_dir=self.runs,
                 http_getter=lambda _url: "203.0.113.9",
             )
+        self.cloud["forbidden_buckets"].remove(forbidden_bucket)
+        recovered = self.aws_alpha.collapse_alpha(
+            aws=aws,
+            identity=self.identity,
+            stack="branchbench-alpha",
+            board=self.board,
+            runs_dir=self.runs,
+        )
+        self.assertTrue(recovered["collapsed"])
 
         # Partial collapse keeps state file and returns collapsed=False
         state = self.aws_alpha.up_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             runs_dir=self.runs,
             http_getter=lambda _url: "203.0.113.9",
@@ -840,6 +1910,7 @@ class AwsAlphaLifecycle(Board):
         self.cloud.setdefault("fail_delete_buckets", set()).add(state["bucket"])
         partial = self.aws_alpha.collapse_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             board=self.board,
             runs_dir=self.runs,
@@ -866,12 +1937,19 @@ class AwsAlphaLifecycle(Board):
                 runner=lambda c, r=bad_rc, e=bad_err, **_kw: subprocess.CompletedProcess(c, r, stdout="", stderr=e),
             )
             with self.assertRaises(self.aws_alpha.AlphaError):
-                self.aws_alpha._classify_head_bucket(bad_aws, "my-404-bucket")
+                self.aws_alpha._classify_head_bucket(
+                    bad_aws,
+                    "my-404-bucket",
+                    self.identity.account_id,
+                )
 
         # Custom bucket name (not starting with stack prefix) is still discovered by tags when state file is missing
         self.cloud["fail_delete_buckets"].clear()
-        self.cloud["buckets"].add("custom-alpha-site-bucket")
-        self.cloud.setdefault("bucket_tags", {})["custom-alpha-site-bucket"] = [
+        custom_bucket = "ai-forking-ik2619-custom-alpha-site-bucket"
+        self.cloud["buckets"].add(custom_bucket)
+        self.cloud.setdefault("bucket_tags", {})[custom_bucket] = [
+            {"Key": "project", "Value": "ai-forking"},
+            {"Key": "billing-tag1", "Value": "ik2619"},
             {"Key": "Project", "Value": "BranchBenchLeaderboard"},
             {"Key": "Phase", "Value": "alpha"},
             {"Key": "Stack", "Value": "branchbench-alpha"},
@@ -879,12 +1957,13 @@ class AwsAlphaLifecycle(Board):
         (self.runs / "aws_alpha_state.json").unlink(missing_ok=True)
         col_all = self.aws_alpha.collapse_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             board=self.board,
             runs_dir=self.runs,
         )
         self.assertTrue(col_all["collapsed"])
-        self.assertIn("custom-alpha-site-bucket", col_all["deleted_buckets"])
+        self.assertIn(custom_bucket, col_all["deleted_buckets"])
         self.assertEqual(self.cloud["buckets"], set())
 
     def test_sync_git_index_reconstruction_elf_check_and_bucket_tag_fail_closed(self):
@@ -912,14 +1991,19 @@ class AwsAlphaLifecycle(Board):
         subprocess.run(["git", "-C", str(src_repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(src_repo), "commit", "-m", "init"], check=True, capture_output=True)
         (src_repo / "leaderboard" / "secret_untracked.txt").write_text("do not sync")
+        stale_dataset = src_repo / "leaderboard" / "data" / "tpcc_10w.sql"
+        stale_dataset.parent.mkdir()
+        stale_dataset.write_text("do not sync")
 
         flist = self.aws_alpha.write_sync_filelist(self.runs, "branchbench-alpha", src_repo)
+        self.assertNotIn("leaderboard/data/tpcc_10w.sql", flist.read_text().splitlines())
         dst_repo.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             ["rsync", "-a", f"--files-from={flist}", f"{src_repo}/", f"{dst_repo}/"],
             check=True,
         )
         self.assertFalse((dst_repo / ".git" / "index").exists(), "index is reconstructed on the destination, not copied")
+        self.assertFalse((dst_repo / "leaderboard" / "data" / "tpcc_10w.sql").exists())
         self.aws_alpha.reconstruct_synced_git_index(dst_repo)
         self.assertTrue((dst_repo / ".git" / "index").is_file())
         st = subprocess.run(
@@ -957,6 +2041,7 @@ class AwsAlphaLifecycle(Board):
         aws = self.aws_alpha.AwsCli(region="us-east-1", runner=self.fake_aws_runner)
         self.aws_alpha.up_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             runs_dir=self.runs,
             http_getter=lambda _url: "203.0.113.9",
@@ -964,6 +2049,7 @@ class AwsAlphaLifecycle(Board):
         with self.assertRaisesRegex(self.aws_alpha.AlphaError, "paper_separated_vms|economic"):
             self.aws_alpha.run_alpha_benchmarks(
                 aws=aws,
+                identity=self.identity,
                 stack="branchbench-alpha",
                 preset="full",
                 profile_mode="paper",
@@ -974,6 +2060,7 @@ class AwsAlphaLifecycle(Board):
             with self.assertRaisesRegex(self.aws_alpha.AlphaError, pat):
                 self.aws_alpha.run_alpha_benchmarks(
                     aws=aws,
+                    identity=self.identity,
                     stack="branchbench-alpha",
                     collapse_after=True,
                     board=self.board,
@@ -1106,6 +2193,7 @@ class AwsAlphaLifecycle(Board):
         with self.assertRaisesRegex(self.aws_alpha.AlphaError, "failed to rsync"):
             self.aws_alpha.run_alpha_benchmarks(
                 aws=aws,
+                identity=self.identity,
                 stack="branchbench-alpha",
                 systems="dolt",
                 board=self.board,
@@ -1126,6 +2214,7 @@ class AwsAlphaLifecycle(Board):
 
         rc_rel_fail = self.aws_alpha.run_alpha_benchmarks(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             systems="dolt",
             deploy_site_after=False,
@@ -1184,6 +2273,7 @@ class AwsAlphaLifecycle(Board):
 
         rc_col_verify_fail = self.aws_alpha.run_alpha_benchmarks(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             systems="dolt",
             deploy_site_after=False,
@@ -1261,16 +2351,19 @@ class AwsAlphaLifecycle(Board):
         err_path.unlink()
 
         # 4. Bucket tag inspection failure (get-bucket-tagging rc=1) causes collapse_alpha to report collapsed=False
-        self.cloud["buckets"].add("branchbench-alpha-unreadable-tags")
-        self.cloud.get("bucket_tags", {}).pop("branchbench-alpha-unreadable-tags", None)
+        self.aws_alpha.state_file_path(self.runs).unlink(missing_ok=True)
+        unreadable_bucket = "ai-forking-ik2619-unreadable-tags"
+        self.cloud["buckets"].add(unreadable_bucket)
+        self.cloud.get("bucket_tags", {}).pop(unreadable_bucket, None)
         col = self.aws_alpha.collapse_alpha(
             aws=aws,
+            identity=self.identity,
             stack="branchbench-alpha",
             board=self.board,
             runs_dir=self.runs,
         )
         self.assertFalse(col["collapsed"], "unreadable bucket tags must fail closed during collapse")
-        self.assertIn("branchbench-alpha-unreadable-tags", col["remaining_buckets"])
+        self.assertIn(unreadable_bucket, col["remaining_buckets"])
 
 
 if __name__ == "__main__":

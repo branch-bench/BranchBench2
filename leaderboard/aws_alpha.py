@@ -1,30 +1,32 @@
-"""Collapsible personal-AWS 'alpha' phase provisioner, runner, site deployer, and teardown CLI.
+"""Collapsible DAPLab AWS 'alpha' provisioner, runner, site deployer, and teardown CLI.
 
 From the repository root:
-    ./leaderboard/aws_alpha.sh up --region us-east-1
-    ./leaderboard/aws_alpha.sh run --preset mini --systems "dolt dolt_mysql"
-    ./leaderboard/aws_alpha.sh deploy-site
-    ./leaderboard/aws_alpha.sh status
-    ./leaderboard/aws_alpha.sh collapse
+    ./leaderboard/aws_alpha.sh up --daplab-project <project> --owner <uni> --daplab-account-id <account>
+    ./leaderboard/aws_alpha.sh run --daplab-project <project> --owner <uni> --daplab-account-id <account> --preset mini
+    ./leaderboard/aws_alpha.sh status --daplab-project <project> --owner <uni> --daplab-account-id <account>
+    ./leaderboard/aws_alpha.sh collapse --daplab-project <project> --owner <uni> --daplab-account-id <account>
 
 Every AWS resource created for the alpha phase is tagged with:
+    project=<registered DAPLab project tag>
+    billing-tag1=<owner UNI>
     Project=BranchBenchLeaderboard
     Phase=alpha
     Stack=<stack>   (default: branchbench-alpha)
 and recorded in leaderboard/.runs/aws_alpha_state.json.
 
-Running `collapse` (or `down` / `destroy`) terminates the EC2 worker, waits for
-termination, deletes any leftover EBS volumes, deletes the security group and key pair,
-empties and deletes the alpha S3 bucket, and removes leaderboard/.site/alpha and the
-local state file so ongoing AWS cost returns to $0.00.
+Running `collapse` (or `down` / `destroy`) deletes resources only after their AWS tags
+prove ownership. It removes the local state only after every owned resource is gone.
+Unverified or wrong-region resources keep the state and produce a partial result.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+from dataclasses import dataclass
 import ipaddress
 import json
+import mimetypes
 import os
 import re
 import shlex
@@ -42,9 +44,11 @@ ROOT = BOARD.parent
 RUNS = BOARD / ".runs"
 DEFAULT_STACK = "branchbench-alpha"
 DEFAULT_REGION = "us-east-1"
-DEFAULT_INSTANCE_TYPE = "i4i.2xlarge"
-DEFAULT_ROOT_GB = 100
+DEFAULT_INSTANCE_TYPE = "t3a.xlarge"
+DEFAULT_ROOT_GB = 64
 STACK_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,46}$")
+TAG_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+AWS_ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
 BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 SSM_UBUNTU_2404_AMD64 = (
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
@@ -66,6 +70,39 @@ class AlphaError(RuntimeError):
     """Actionable error during AWS alpha phase lifecycle operations."""
 
 
+@dataclass(frozen=True)
+class DaplabIdentity:
+    """DAPLab account and billing identity required for every AWS operation."""
+
+    project: str
+    owner: str
+    account_id: str
+
+    def __post_init__(self) -> None:
+        for option, value in (("--daplab-project", self.project), ("--owner", self.owner)):
+            if not isinstance(value, str) or not TAG_VALUE_RE.fullmatch(value):
+                raise AlphaError(
+                    f"invalid {option} {value!r}: must match {TAG_VALUE_RE.pattern}"
+                )
+        if not isinstance(self.account_id, str) or not AWS_ACCOUNT_RE.fullmatch(
+            self.account_id
+        ):
+            raise AlphaError(
+                "invalid --daplab-account-id: expected the 12-digit shared AWS account ID"
+            )
+
+    @property
+    def name_prefix(self) -> str:
+        return f"{_name_component(self.project)}-{_name_component(self.owner)}"
+
+    def resource_name(self, purpose: str) -> str:
+        return f"{self.name_prefix}-{_name_component(purpose)}"
+
+
+def _name_component(value: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
+
+
 def validate_stack(stack: str) -> str:
     if not isinstance(stack, str) or not STACK_RE.fullmatch(stack):
         raise AlphaError(
@@ -79,14 +116,87 @@ def default_machine_label(instance_type: str, region: str) -> str:
     return slug[:64]
 
 
-def tag_spec(resource_type: str, stack: str, name: str | None = None) -> str:
+def resource_tags(stack: str, identity: DaplabIdentity, name: str) -> list[dict[str, str]]:
+    return [
+        {"Key": "project", "Value": identity.project},
+        {"Key": "billing-tag1", "Value": identity.owner},
+        {"Key": "Project", "Value": "BranchBenchLeaderboard"},
+        {"Key": "Phase", "Value": "alpha"},
+        {"Key": "Stack", "Value": stack},
+        {"Key": "Name", "Value": name},
+    ]
+
+
+def tag_spec(resource_type: str, stack: str, identity: DaplabIdentity, name: str) -> str:
     tags = [
-        f"{{Key=Project,Value=BranchBenchLeaderboard}}",
-        f"{{Key=Phase,Value=alpha}}",
-        f"{{Key=Stack,Value={stack}}}",
-        f"{{Key=Name,Value={name or stack}}}",
+        f"{{Key={tag['Key']},Value={tag['Value']}}}"
+        for tag in resource_tags(stack, identity, name)
     ]
     return f"ResourceType={resource_type},Tags=[{','.join(tags)}]"
+
+
+def ownership_filters(stack: str, identity: DaplabIdentity) -> list[str]:
+    return [
+        "Name=tag:Project,Values=BranchBenchLeaderboard",
+        "Name=tag:Phase,Values=alpha",
+        f"Name=tag:Stack,Values={stack}",
+        f"Name=tag:project,Values={identity.project}",
+        f"Name=tag:billing-tag1,Values={identity.owner}",
+    ]
+
+
+def has_ownership_tags(
+    tags: list[dict[str, Any]],
+    stack: str,
+    identity: DaplabIdentity,
+) -> bool:
+    values = {
+        str(item.get("Key") or ""): str(item.get("Value") or "")
+        for item in tags
+        if isinstance(item, dict)
+    }
+    return (
+        values.get("Project") == "BranchBenchLeaderboard"
+        and values.get("Phase") == "alpha"
+        and values.get("Stack") == stack
+        and values.get("project") == identity.project
+        and values.get("billing-tag1") == identity.owner
+    )
+
+
+def verify_state_identity(state: dict[str, Any], identity: DaplabIdentity) -> None:
+    if not state:
+        return
+    if (
+        state.get("daplab_project") != identity.project
+        or state.get("billing_tag1") != identity.owner
+        or str(state.get("account_id") or "") != identity.account_id
+    ):
+        raise AlphaError(
+            "local alpha state does not match the DAPLab account, project, and owner; "
+            "refusing to inspect or modify its AWS resources"
+        )
+
+
+def verify_state_target(
+    state: dict[str, Any],
+    *,
+    region: str,
+) -> None:
+    if not state:
+        return
+    if state.get("region") != region:
+        raise AlphaError(
+            f"local alpha state belongs to AWS region {state.get('region')!r}, "
+            f"not {region!r}"
+        )
+
+
+def verify_alpha_region(aws: "AwsCli") -> None:
+    if aws.region != DEFAULT_REGION:
+        raise AlphaError(
+            f"DAPLab alpha is locked to {DEFAULT_REGION}; got {aws.region!r}"
+        )
 
 
 def state_file_path(runs_dir: Path = RUNS, stack: str = DEFAULT_STACK) -> Path:
@@ -273,6 +383,25 @@ def caller_identity(aws: AwsCli) -> dict[str, str]:
     return {"account_id": account, "arn": arn}
 
 
+def verify_caller_owner(caller: dict[str, str], identity: DaplabIdentity) -> None:
+    if caller.get("account_id") != identity.account_id:
+        raise AlphaError(
+            "AWS caller account does not match --daplab-account-id "
+            f"({identity.account_id})"
+        )
+    arn = caller.get("arn", "")
+    if ":user/" not in arn or arn.rsplit("/", 1)[-1] != identity.owner:
+        raise AlphaError(
+            f"AWS caller must be the IAM user named by --owner ({identity.owner!r})"
+        )
+
+
+def require_caller_owner(aws: AwsCli, identity: DaplabIdentity) -> dict[str, str]:
+    caller = caller_identity(aws)
+    verify_caller_owner(caller, identity)
+    return caller
+
+
 def resolve_ubuntu_ami(aws: AwsCli, explicit_ami: str = "") -> str:
     if explicit_ami.strip():
         return explicit_ami.strip()
@@ -304,30 +433,38 @@ def resolve_ubuntu_ami(aws: AwsCli, explicit_ami: str = "") -> str:
     return str(candidates[0]["ImageId"])
 
 
-def default_bucket_name(stack: str, account_id: str, region: str) -> str:
-    name = f"{stack}-{account_id}-{region}".lower()
-    name = re.sub(r"[^a-z0-9.-]+", "-", name).strip("-.")
-    return name[:63]
+def default_bucket_name(
+    stack: str,
+    account_id: str,
+    region: str,
+    identity: DaplabIdentity,
+) -> str:
+    suffix = f"-site-{account_id}-{region.lower()}"
+    available = 63 - len(identity.name_prefix) - len(suffix) - 1
+    purpose = _name_component(stack)[:available].rstrip("-") if available > 0 else ""
+    if not purpose:
+        raise AlphaError("DAPLab project and owner are too long for a compliant S3 bucket name")
+    return f"{identity.name_prefix}-{purpose}{suffix}"
 
 
-def discover_stack_resources(aws: AwsCli, stack: str, state: dict[str, Any]) -> dict[str, Any]:
-    """Find all AWS resources belonging to (Phase=alpha, Stack=<stack>), merged with state."""
+def discover_stack_resources(
+    aws: AwsCli,
+    stack: str,
+    state: dict[str, Any],
+    identity: DaplabIdentity,
+) -> dict[str, Any]:
+    """Find this DAPLab owner's alpha resources and merge them with local state."""
     validate_stack(stack)
-    tag_filters = [
-        "Name=tag:Project,Values=BranchBenchLeaderboard",
-        "Name=tag:Phase,Values=alpha",
-        f"Name=tag:Stack,Values={stack}",
-    ]
+    verify_state_identity(state, identity)
+    tag_filters = ownership_filters(stack, identity)
 
     inst_resp = aws.call_json(["ec2", "describe-instances", "--filters", *tag_filters])
     instances: list[dict[str, Any]] = []
-    seen_instances: set[str] = set()
     for resv in inst_resp.get("Reservations") or []:
         for inst in resv.get("Instances") or []:
             iid = str(inst.get("InstanceId") or "")
             st = str((inst.get("State") or {}).get("Name") or "")
             if iid and st != "terminated":
-                seen_instances.add(iid)
                 instances.append(
                     {
                         "instance_id": iid,
@@ -336,22 +473,6 @@ def discover_stack_resources(aws: AwsCli, stack: str, state: dict[str, Any]) -> 
                         "public_ip": str(inst.get("PublicIpAddress") or ""),
                     }
                 )
-    state_iid = str(state.get("instance_id") or "")
-    if state_iid and state_iid not in seen_instances:
-        extra = aws.call_json(["ec2", "describe-instances", "--instance-ids", state_iid])
-        for resv in extra.get("Reservations") or []:
-            for inst in resv.get("Instances") or []:
-                st = str((inst.get("State") or {}).get("Name") or "")
-                if st != "terminated":
-                    instances.append(
-                        {
-                            "instance_id": state_iid,
-                            "state": st,
-                            "instance_type": str(inst.get("InstanceType") or ""),
-                            "public_ip": str(inst.get("PublicIpAddress") or ""),
-                        }
-                    )
-
     vol_resp = aws.call_json(["ec2", "describe-volumes", "--filters", *tag_filters])
     volumes = [
         {
@@ -364,31 +485,145 @@ def discover_stack_resources(aws: AwsCli, stack: str, state: dict[str, Any]) -> 
 
     sg_resp = aws.call_json(["ec2", "describe-security-groups", "--filters", *tag_filters])
     sgs = [str(g.get("GroupId") or "") for g in (sg_resp.get("SecurityGroups") or []) if g.get("GroupId")]
-    state_sg = str(state.get("security_group_id") or "")
-    if state_sg and state_sg not in sgs:
-        sgs.append(state_sg)
 
     kp_resp = aws.call_json(["ec2", "describe-key-pairs", "--filters", *tag_filters])
     keys = [str(k.get("KeyName") or "") for k in (kp_resp.get("KeyPairs") or []) if k.get("KeyName")]
-    state_key = str(state.get("key_name") or "")
-    if state_key and state_key not in keys:
-        keys.append(state_key)
+
+    unverified_resources: list[dict[str, str]] = []
+    state_instance_id = str(state.get("instance_id") or "")
+    if state_instance_id and not any(
+        item["instance_id"] == state_instance_id for item in instances
+    ):
+        response = aws.call_json(
+            [
+                "ec2",
+                "describe-instances",
+                "--filters",
+                f"Name=instance-id,Values={state_instance_id}",
+            ]
+        )
+        matches = [
+            item
+            for reservation in (response.get("Reservations") or [])
+            for item in (reservation.get("Instances") or [])
+            if str(item.get("InstanceId") or "") == state_instance_id
+            and str((item.get("State") or {}).get("Name") or "") != "terminated"
+        ]
+        if matches:
+            if has_ownership_tags(matches[0].get("Tags") or [], stack, identity):
+                instance = matches[0]
+                instances.append(
+                    {
+                        "instance_id": state_instance_id,
+                        "state": str((instance.get("State") or {}).get("Name") or ""),
+                        "instance_type": str(instance.get("InstanceType") or ""),
+                        "public_ip": str(instance.get("PublicIpAddress") or ""),
+                    }
+                )
+            else:
+                unverified_resources.append(
+                    {"type": "instance", "id": state_instance_id}
+                )
+
+    state_sg_id = str(state.get("security_group_id") or "")
+    if state_sg_id and state_sg_id not in sgs:
+        response = aws.call_json(
+            [
+                "ec2",
+                "describe-security-groups",
+                "--filters",
+                f"Name=group-id,Values={state_sg_id}",
+            ]
+        )
+        matches = [
+            item
+            for item in (response.get("SecurityGroups") or [])
+            if str(item.get("GroupId") or "") == state_sg_id
+        ]
+        if matches:
+            if has_ownership_tags(matches[0].get("Tags") or [], stack, identity):
+                sgs.append(state_sg_id)
+            else:
+                unverified_resources.append(
+                    {"type": "security_group", "id": state_sg_id}
+                )
+
+    state_key_name = str(state.get("key_name") or "")
+    if state_key_name and state_key_name not in keys:
+        response = aws.call_json(
+            [
+                "ec2",
+                "describe-key-pairs",
+                "--filters",
+                f"Name=key-name,Values={state_key_name}",
+            ]
+        )
+        matches = [
+            item
+            for item in (response.get("KeyPairs") or [])
+            if str(item.get("KeyName") or "") == state_key_name
+        ]
+        if matches:
+            if has_ownership_tags(matches[0].get("Tags") or [], stack, identity):
+                keys.append(state_key_name)
+            else:
+                unverified_resources.append(
+                    {"type": "key_pair", "id": state_key_name}
+                )
 
     buckets: list[str] = []
     unverified_buckets: list[str] = []
+    wrong_region_buckets: list[dict[str, str]] = []
     bucket_discovery_error = ""
     state_bucket = str(state.get("bucket") or "")
     if state_bucket:
-        buckets.append(state_bucket)
+        try:
+            if (
+                _classify_head_bucket(aws, state_bucket, identity.account_id)
+                == "exists"
+            ):
+                ownership, bucket_region = _inspect_bucket_ownership(
+                    aws,
+                    stack,
+                    state_bucket,
+                    identity,
+                )
+                if ownership == "owned":
+                    buckets.append(state_bucket)
+                elif ownership == "wrong-region":
+                    wrong_region_buckets.append(
+                        {"bucket": state_bucket, "region": bucket_region}
+                    )
+                else:
+                    unverified_buckets.append(state_bucket)
+        except AlphaError:
+            unverified_buckets.append(state_bucket)
     try:
-        b_resp = aws.call_json(["s3api", "list-buckets"])
+        prefix = f"{identity.name_prefix}-"
+        b_resp = aws.call_json(["s3api", "list-buckets", "--prefix", prefix])
         for b_item in b_resp.get("Buckets") or []:
             b_name = str((b_item or {}).get("Name") or "")
-            if not b_name or b_name in buckets:
+            if (
+                not b_name.startswith(prefix)
+                or b_name in buckets
+                or b_name in unverified_buckets
+                or any(
+                    item["bucket"] == b_name for item in wrong_region_buckets
+                )
+            ):
                 continue
-            ownership = _inspect_bucket_ownership(aws, stack, b_name)
+            ownership, bucket_region = _inspect_bucket_ownership(
+                aws,
+                stack,
+                b_name,
+                identity,
+            )
             if ownership == "owned":
                 buckets.append(b_name)
+            elif ownership == "wrong-region":
+                wrong_region_buckets.append(
+                    {"bucket": b_name, "region": bucket_region}
+                )
             elif ownership == "unknown":
                 unverified_buckets.append(b_name)
     except AlphaError as exc:
@@ -397,23 +632,78 @@ def discover_stack_resources(aws: AwsCli, stack: str, state: dict[str, Any]) -> 
     return {
         "stack": stack,
         "region": aws.region,
+        "daplab_project": identity.project,
+        "billing_tag1": identity.owner,
+        "account_id": identity.account_id,
         "instances": instances,
         "volumes": volumes,
         "security_groups": sgs,
         "key_pairs": keys,
+        "unverified_resources": unverified_resources,
         "bucket": bucket,
         "buckets": buckets,
         "unverified_buckets": unverified_buckets,
+        "wrong_region_buckets": wrong_region_buckets,
         "bucket_discovery_error": bucket_discovery_error,
     }
 
 
-def ensure_key_pair(aws: AwsCli, stack: str, runs_dir: Path) -> tuple[str, Path]:
-    key_name = f"{stack}-key"
+def running_owned_instance(
+    aws: AwsCli,
+    stack: str,
+    state: dict[str, Any],
+    identity: DaplabIdentity,
+) -> dict[str, str]:
+    instance_id = str(state.get("instance_id") or "")
+    if not instance_id:
+        raise AlphaError(f"no alpha instance ID in state for stack {stack!r}; run 'up' first")
+    response = aws.call_json(
+        [
+            "ec2",
+            "describe-instances",
+            "--filters",
+            f"Name=instance-id,Values={instance_id}",
+            *ownership_filters(stack, identity),
+        ]
+    )
+    instances = [
+        instance
+        for reservation in (response.get("Reservations") or [])
+        for instance in (reservation.get("Instances") or [])
+        if str(instance.get("InstanceId") or "") == instance_id
+    ]
+    if len(instances) != 1:
+        raise AlphaError(
+            f"recorded instance {instance_id!r} is not owned by this DAPLab stack"
+        )
+    instance = instances[0]
+    instance_state = str((instance.get("State") or {}).get("Name") or "")
+    public_ip = str(instance.get("PublicIpAddress") or "")
+    if instance_state != "running" or not public_ip:
+        raise AlphaError(
+            f"owned instance {instance_id} is not ready: state={instance_state!r}, "
+            f"public_ip={public_ip or '(none)'}"
+        )
+    return {"instance_id": instance_id, "public_ip": public_ip}
+
+
+def ensure_key_pair(
+    aws: AwsCli,
+    stack: str,
+    identity: DaplabIdentity,
+    runs_dir: Path,
+) -> tuple[str, Path]:
+    key_name = identity.resource_name(f"{stack}-key")
     pem_path = key_file_path(runs_dir, stack)
     runs_dir.mkdir(parents=True, exist_ok=True)
     existing = aws.call_json(
-        ["ec2", "describe-key-pairs", "--filters", f"Name=key-name,Values={key_name}"]
+        [
+            "ec2",
+            "describe-key-pairs",
+            "--filters",
+            f"Name=key-name,Values={key_name}",
+            *ownership_filters(stack, identity),
+        ]
     ).get("KeyPairs") or []
     if existing and pem_path.is_file():
         return key_name, pem_path
@@ -428,7 +718,7 @@ def ensure_key_pair(aws: AwsCli, stack: str, runs_dir: Path) -> tuple[str, Path]
             "--key-type",
             "ed25519",
             "--tag-specifications",
-            tag_spec("key-pair", stack, key_name),
+            tag_spec("key-pair", stack, identity, key_name),
         ]
     )
     material = str(created.get("KeyMaterial") or "")
@@ -444,9 +734,15 @@ def ensure_key_pair(aws: AwsCli, stack: str, runs_dir: Path) -> tuple[str, Path]
     return key_name, pem_path
 
 
-def ensure_security_group(aws: AwsCli, stack: str, ssh_cidr: str, vpc_id: str = "") -> str:
-    sg_name = f"{stack}-sg"
-    filters = [f"Name=group-name,Values={sg_name}"]
+def ensure_security_group(
+    aws: AwsCli,
+    stack: str,
+    identity: DaplabIdentity,
+    ssh_cidr: str,
+    vpc_id: str = "",
+) -> str:
+    sg_name = identity.resource_name(f"{stack}-sg")
+    filters = [f"Name=group-name,Values={sg_name}", *ownership_filters(stack, identity)]
     if vpc_id:
         filters.append(f"Name=vpc-id,Values={vpc_id}")
     existing = aws.call_json(["ec2", "describe-security-groups", "--filters", *filters]).get("SecurityGroups") or []
@@ -461,7 +757,7 @@ def ensure_security_group(aws: AwsCli, stack: str, ssh_cidr: str, vpc_id: str = 
             "--description",
             f"BranchBench alpha development worker ({stack})",
             "--tag-specifications",
-            tag_spec("security-group", stack, sg_name),
+            tag_spec("security-group", stack, identity, sg_name),
         ]
         if vpc_id:
             create_args.extend(["--vpc-id", vpc_id])
@@ -469,7 +765,7 @@ def ensure_security_group(aws: AwsCli, stack: str, ssh_cidr: str, vpc_id: str = 
         sg_id = str(created.get("GroupId") or "")
         if not sg_id:
             raise AlphaError("ec2 create-security-group returned no GroupId")
-    aws.call_text(
+    ingress = aws.call_text(
         [
             "ec2",
             "authorize-security-group-ingress",
@@ -481,15 +777,95 @@ def ensure_security_group(aws: AwsCli, stack: str, ssh_cidr: str, vpc_id: str = 
             "22",
             "--cidr",
             ssh_cidr,
+            "--tag-specifications",
+            tag_spec(
+                "security-group-rule",
+                stack,
+                identity,
+                identity.resource_name(f"{stack}-ssh-ingress"),
+            ),
         ],
         check=False,
     )
+    ingress_error = (ingress.stderr or ingress.stdout or "").strip()
+    if ingress.returncode != 0 and "InvalidPermission.Duplicate" not in ingress_error:
+        raise AlphaError(
+            "ec2 authorize-security-group-ingress failed: "
+            f"{ingress_error or f'exit {ingress.returncode}'}"
+        )
+    rules = aws.call_json(
+        [
+            "ec2",
+            "describe-security-group-rules",
+            "--filters",
+            f"Name=group-id,Values={sg_id}",
+        ]
+    ).get("SecurityGroupRules") or []
+    if not rules:
+        raise AlphaError(f"security group {sg_id} has no rules to tag")
+    kept_rules: list[dict[str, Any]] = []
+    for rule in rules:
+        rule_id = str(rule.get("SecurityGroupRuleId") or "")
+        if not rule_id:
+            raise AlphaError(f"security group {sg_id} returned a rule without an ID")
+        desired_ingress = (
+            not rule.get("IsEgress")
+            and str(rule.get("IpProtocol") or "") == "tcp"
+            and rule.get("FromPort") == 22
+            and rule.get("ToPort") == 22
+            and str(rule.get("CidrIpv4") or "") == ssh_cidr
+        )
+        if not rule.get("IsEgress") and not desired_ingress:
+            aws.call_text(
+                [
+                    "ec2",
+                    "revoke-security-group-ingress",
+                    "--group-id",
+                    sg_id,
+                    "--security-group-rule-ids",
+                    rule_id,
+                ]
+            )
+            continue
+        kept_rules.append(rule)
+    if not any(not rule.get("IsEgress") for rule in kept_rules):
+        raise AlphaError(
+            f"security group {sg_id} does not contain the requested SSH rule {ssh_cidr}"
+        )
+    for rule in kept_rules:
+        rule_id = str(rule["SecurityGroupRuleId"])
+        purpose = "egress" if rule.get("IsEgress") else "ingress"
+        tags = [
+            f"Key={tag['Key']},Value={tag['Value']}"
+            for tag in resource_tags(
+                stack,
+                identity,
+                identity.resource_name(f"{stack}-{purpose}"),
+            )
+        ]
+        aws.call_text(
+            ["ec2", "create-tags", "--resources", rule_id, "--tags", *tags]
+        )
     return sg_id
 
 
-def _classify_head_bucket(aws: AwsCli, bucket: str) -> str:
+def _classify_head_bucket(
+    aws: AwsCli,
+    bucket: str,
+    expected_owner: str,
+) -> str:
     """Return 'exists' if head-bucket succeeds, 'missing' on explicit 404/NoSuchBucket, or raise AlphaError."""
-    head = aws.call_text(["s3api", "head-bucket", "--bucket", bucket], check=False)
+    head = aws.call_text(
+        [
+            "s3api",
+            "head-bucket",
+            "--bucket",
+            bucket,
+            "--expected-bucket-owner",
+            expected_owner,
+        ],
+        check=False,
+    )
     if head.returncode == 0:
         return "exists"
     detail = (head.stderr or head.stdout or "").strip()
@@ -505,57 +881,110 @@ def _classify_head_bucket(aws: AwsCli, bucket: str) -> str:
     raise AlphaError(f"aws s3api head-bucket failed for {bucket!r}: {detail or f'exit {head.returncode}'}")
 
 
-def _inspect_bucket_ownership(aws: AwsCli, stack: str, bucket: str) -> str:
-    """Return 'owned', 'foreign', or 'unknown' (when bucket tag inspection fails or cannot rule out ownership)."""
+def _bucket_region(aws: AwsCli, bucket: str, expected_owner: str) -> str:
+    location = aws.call_json(
+        [
+            "s3api",
+            "get-bucket-location",
+            "--bucket",
+            bucket,
+            "--expected-bucket-owner",
+            expected_owner,
+        ]
+    ).get("LocationConstraint")
+    if not location:
+        return "us-east-1"
+    return "eu-west-1" if location == "EU" else str(location)
+
+
+def _inspect_bucket_ownership(
+    aws: AwsCli,
+    stack: str,
+    bucket: str,
+    identity: DaplabIdentity,
+) -> tuple[str, str]:
+    """Return ownership status and physical bucket region."""
+    bucket_region = ""
     try:
-        tag_resp = aws.call_json(["s3api", "get-bucket-tagging", "--bucket", bucket])
+        bucket_region = _bucket_region(aws, bucket, identity.account_id)
+        tag_aws = aws
+        if bucket_region != aws.region:
+            tag_aws = AwsCli(
+                region=bucket_region,
+                profile=aws.profile,
+                runner=aws.runner,
+            )
+        tag_resp = tag_aws.call_json(
+            [
+                "s3api",
+                "get-bucket-tagging",
+                "--bucket",
+                bucket,
+                "--expected-bucket-owner",
+                identity.account_id,
+            ]
+        )
     except AlphaError as exc:
         low = str(exc).lower()
-        if "nosuchtagset" in low and not bucket.startswith(f"{stack}-"):
-            return "foreign"
-        return "unknown"
-    tags = {
-        str(item.get("Key") or ""): str(item.get("Value") or "")
-        for item in (tag_resp.get("TagSet") or [])
-        if isinstance(item, dict)
-    }
-    if (
-        tags.get("Phase") == "alpha"
-        and tags.get("Stack") == stack
-        and tags.get("Project") in ("BranchBenchLeaderboard", "branchbench")
-    ):
-        return "owned"
-    return "foreign"
+        if "nosuchtagset" in low and not bucket.startswith(f"{identity.name_prefix}-"):
+            return "foreign", bucket_region
+        return "unknown", bucket_region
+    if has_ownership_tags(tag_resp.get("TagSet") or [], stack, identity):
+        status = "owned" if bucket_region == aws.region else "wrong-region"
+        return status, bucket_region
+    return "foreign", bucket_region
 
 
-def verify_bucket_ownership(aws: AwsCli, stack: str, bucket: str) -> None:
+def verify_bucket_ownership(
+    aws: AwsCli,
+    stack: str,
+    bucket: str,
+    identity: DaplabIdentity,
+) -> None:
     """Refuse to overwrite, sync-delete, or destroy a pre-existing bucket unless its tags prove alpha stack ownership."""
     try:
-        tag_resp = aws.call_json(["s3api", "get-bucket-tagging", "--bucket", bucket])
+        bucket_region = _bucket_region(aws, bucket, identity.account_id)
+        tag_resp = aws.call_json(
+            [
+                "s3api",
+                "get-bucket-tagging",
+                "--bucket",
+                bucket,
+                "--expected-bucket-owner",
+                identity.account_id,
+            ]
+        )
     except AlphaError as exc:
         raise AlphaError(
             f"refusing to modify or delete pre-existing S3 bucket {bucket!r}: cannot verify ownership tags ({exc})"
         ) from exc
-    tags = {
-        str(item.get("Key") or ""): str(item.get("Value") or "")
-        for item in (tag_resp.get("TagSet") or [])
-        if isinstance(item, dict)
-    }
-    if (
-        tags.get("Phase") != "alpha"
-        or tags.get("Stack") != stack
-        or tags.get("Project") not in ("BranchBenchLeaderboard", "branchbench")
-    ):
+    if bucket_region != aws.region:
+        raise AlphaError(
+            f"refusing to modify or delete S3 bucket {bucket!r}: bucket region "
+            f"{bucket_region!r} does not match {aws.region!r}"
+        )
+    if not has_ownership_tags(tag_resp.get("TagSet") or [], stack, identity):
         raise AlphaError(
             f"refusing to modify or delete pre-existing S3 bucket {bucket!r}: "
-            f"bucket tags {tags!r} do not match Phase=alpha, Stack={stack!r}"
+            "ownership tags do not match this DAPLab project, owner, and alpha stack"
         )
 
 
-def ensure_bucket(aws: AwsCli, stack: str, bucket: str, public_site: bool = False) -> str:
+def ensure_bucket(
+    aws: AwsCli,
+    stack: str,
+    bucket: str,
+    identity: DaplabIdentity,
+    public_site: bool = False,
+) -> str:
     if not BUCKET_RE.fullmatch(bucket):
         raise AlphaError(f"invalid S3 bucket name {bucket!r}")
-    bstate = _classify_head_bucket(aws, bucket)
+    if not bucket.startswith(f"{identity.name_prefix}-"):
+        raise AlphaError(
+            f"S3 bucket name must follow the DAPLab {identity.name_prefix}-<purpose> convention"
+        )
+    bstate = _classify_head_bucket(aws, bucket, identity.account_id)
+    created = bstate == "missing"
     if bstate == "missing":
         create_args = ["s3api", "create-bucket", "--bucket", bucket]
         if aws.region != "us-east-1":
@@ -564,66 +993,137 @@ def ensure_bucket(aws: AwsCli, stack: str, bucket: str, public_site: bool = Fals
             )
         aws.call_json(create_args)
     else:
-        verify_bucket_ownership(aws, stack, bucket)
-    tagging = (
-        "TagSet=["
-        "{Key=Project,Value=BranchBenchLeaderboard},"
-        "{Key=Phase,Value=alpha},"
-        f"{{Key=Stack,Value={stack}}}"
-        "]"
-    )
-    aws.call_text(
-        ["s3api", "put-bucket-tagging", "--bucket", bucket, "--tagging", tagging],
-        check=True,
-    )
-    if public_site:
+        verify_bucket_ownership(aws, stack, bucket, identity)
+    try:
+        tagging = json.dumps({"TagSet": resource_tags(stack, identity, bucket)})
         aws.call_text(
             [
                 "s3api",
-                "put-public-access-block",
+                "put-bucket-tagging",
                 "--bucket",
                 bucket,
-                "--public-access-block-configuration",
-                "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false",
+                "--tagging",
+                tagging,
+                "--expected-bucket-owner",
+                identity.account_id,
             ],
             check=True,
         )
-        aws.call_text(["s3", "website", f"s3://{bucket}/", "--index-document", "index.html"], check=True)
-        policy = json.dumps(
+        encryption = json.dumps(
             {
-                "Version": "2012-10-17",
-                "Statement": [
+                "Rules": [
                     {
-                        "Sid": "AlphaPublicRead",
-                        "Effect": "Allow",
-                        "Principal": "*",
-                        "Action": ["s3:GetObject"],
-                        "Resource": [f"arn:aws:s3:::{bucket}/*"],
+                        "ApplyServerSideEncryptionByDefault": {
+                            "SSEAlgorithm": "AES256"
+                        }
                     }
-                ],
+                ]
             }
         )
-        aws.call_text(["s3api", "put-bucket-policy", "--bucket", bucket, "--policy", policy], check=True)
-    else:
         aws.call_text(
             [
                 "s3api",
-                "put-public-access-block",
+                "put-bucket-encryption",
                 "--bucket",
                 bucket,
-                "--public-access-block-configuration",
-                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true",
+                "--server-side-encryption-configuration",
+                encryption,
+                "--expected-bucket-owner",
+                identity.account_id,
             ],
             check=True,
         )
+        if public_site:
+            aws.call_text(
+                [
+                    "s3api",
+                    "put-public-access-block",
+                    "--bucket",
+                    bucket,
+                    "--public-access-block-configuration",
+                    "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false",
+                    "--expected-bucket-owner",
+                    identity.account_id,
+                ],
+                check=True,
+            )
+            website = json.dumps({"IndexDocument": {"Suffix": "index.html"}})
+            aws.call_text(
+                [
+                    "s3api",
+                    "put-bucket-website",
+                    "--bucket",
+                    bucket,
+                    "--website-configuration",
+                    website,
+                    "--expected-bucket-owner",
+                    identity.account_id,
+                ],
+                check=True,
+            )
+            policy = json.dumps(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "AlphaPublicRead",
+                            "Effect": "Allow",
+                            "Principal": "*",
+                            "Action": ["s3:GetObject"],
+                            "Resource": [f"arn:aws:s3:::{bucket}/*"],
+                        }
+                    ],
+                }
+            )
+            aws.call_text(
+                [
+                    "s3api",
+                    "put-bucket-policy",
+                    "--bucket",
+                    bucket,
+                    "--policy",
+                    policy,
+                    "--expected-bucket-owner",
+                    identity.account_id,
+                ],
+                check=True,
+            )
+        else:
+            aws.call_text(
+                [
+                    "s3api",
+                    "put-public-access-block",
+                    "--bucket",
+                    bucket,
+                    "--public-access-block-configuration",
+                    "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true",
+                    "--expected-bucket-owner",
+                    identity.account_id,
+                ],
+                check=True,
+            )
+    except BaseException:
+        if created:
+            aws.call_text(
+                [
+                    "s3api",
+                    "delete-bucket",
+                    "--bucket",
+                    bucket,
+                    "--expected-bucket-owner",
+                    identity.account_id,
+                ],
+                check=False,
+            )
+        raise
     return bucket
 
 
 def up_alpha(
     *,
     aws: AwsCli,
+    identity: DaplabIdentity,
     stack: str = DEFAULT_STACK,
-    instance_type: str = DEFAULT_INSTANCE_TYPE,
     ami_id: str = "",
     ssh_cidr: str = "",
     vpc_id: str = "",
@@ -638,11 +1138,15 @@ def up_alpha(
     http_getter: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     validate_stack(stack)
-    machine_label = machine.strip() or default_machine_label(instance_type, aws.region)
+    verify_alpha_region(aws)
+    machine_label = machine.strip() or default_machine_label(
+        DEFAULT_INSTANCE_TYPE,
+        aws.region,
+    )
     if not MACHINE_RE.fullmatch(machine_label):
         raise AlphaError(f"invalid --machine {machine_label!r}")
-    if root_gb < 40:
-        raise AlphaError("--root-gb must be at least 40 GiB")
+    if root_gb < 64:
+        raise AlphaError("--root-gb must be at least 64 GiB")
 
     cidr = detect_caller_cidr(ssh_cidr, http_getter=http_getter)
     if aws.dry_run:
@@ -651,21 +1155,53 @@ def up_alpha(
             "dry_run": True,
             "phase": "alpha",
             "stack": stack,
+            "daplab_project": identity.project,
+            "billing_tag1": identity.owner,
+            "account_id": identity.account_id,
             "region": aws.region,
-            "instance_type": instance_type,
+            "instance_type": DEFAULT_INSTANCE_TYPE,
             "spot": spot,
             "root_gb": root_gb,
             "ssh_cidr": cidr,
             "machine": machine_label,
-            "bucket": None if no_bucket else (bucket or f"{stack}-<account_id>-{aws.region}"),
+            "resource_name_prefix": identity.resource_name(stack),
+            "bucket": (
+                None
+                if no_bucket
+                else (
+                    bucket
+                    or default_bucket_name(
+                        stack,
+                        identity.account_id,
+                        aws.region,
+                        identity,
+                    )
+                )
+            ),
             "public_site": public_site,
         }
         print(json.dumps(plan, indent=2))
         return plan
 
-    ident = caller_identity(aws)
+    ident = require_caller_owner(aws, identity)
     prev = load_state(runs_dir, stack)
-    discovered = discover_stack_resources(aws, stack, prev)
+    verify_state_identity(prev, identity)
+    verify_state_target(prev, region=aws.region)
+    discovered = discover_stack_resources(aws, stack, prev, identity)
+    if discovered["wrong_region_buckets"]:
+        raise AlphaError(
+            "owned alpha bucket exists outside us-east-1; remove it in its recorded "
+            f"region first: {discovered['wrong_region_buckets']!r}"
+        )
+    if (
+        discovered["unverified_resources"]
+        or discovered["unverified_buckets"]
+        or discovered["bucket_discovery_error"]
+    ):
+        raise AlphaError(
+            "cannot safely provision while alpha resource ownership is unresolved; "
+            "run status and inspect the retained state"
+        )
     active_instances = [
         i for i in discovered["instances"] if i["state"] in ("pending", "running", "stopping", "stopped")
     ]
@@ -673,18 +1209,20 @@ def up_alpha(
         existing_id = active_instances[0]["instance_id"]
         raise AlphaError(
             f"stack {stack!r} already has an EC2 instance {existing_id} ({active_instances[0]['state']}); "
-            f"run './leaderboard/aws_alpha.sh status' or './leaderboard/aws_alpha.sh collapse' first"
+            "run status or collapse with the same --daplab-project and --owner first"
         )
 
     resolved_ami = resolve_ubuntu_ami(aws, ami_id)
     state: dict[str, Any] = {
         "phase": "alpha",
         "stack": stack,
+        "daplab_project": identity.project,
+        "billing_tag1": identity.owner,
         "region": aws.region,
         "account_id": ident["account_id"],
         "caller_arn": ident["arn"],
         "instance_id": "",
-        "instance_type": instance_type,
+        "instance_type": DEFAULT_INSTANCE_TYPE,
         "ami_id": resolved_ami,
         "spot": spot,
         "public_ip": "",
@@ -698,24 +1236,38 @@ def up_alpha(
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
 
-    key_name, pem_path = ensure_key_pair(aws, stack, runs_dir)
+    key_name, pem_path = ensure_key_pair(aws, stack, identity, runs_dir)
     state["key_name"] = key_name
     state["key_path"] = str(pem_path)
     save_state(state, runs_dir, stack)
 
-    sg_id = ensure_security_group(aws, stack, cidr, vpc_id=vpc_id)
+    sg_id = ensure_security_group(aws, stack, identity, cidr, vpc_id=vpc_id)
     state["security_group_id"] = sg_id
     save_state(state, runs_dir, stack)
 
     bucket_name = ""
     if not no_bucket:
-        target_bucket = bucket.strip() or default_bucket_name(stack, ident["account_id"], aws.region)
+        target_bucket = bucket.strip() or default_bucket_name(
+            stack,
+            ident["account_id"],
+            aws.region,
+            identity,
+        )
         state["bucket"] = target_bucket
         save_state(state, runs_dir, stack)
         try:
-            bucket_name = ensure_bucket(aws, stack, target_bucket, public_site=public_site)
+            bucket_name = ensure_bucket(
+                aws,
+                stack,
+                target_bucket,
+                identity,
+                public_site=public_site,
+            )
         except BaseException:
-            if _classify_head_bucket(aws, target_bucket) == "missing":
+            if (
+                _classify_head_bucket(aws, target_bucket, identity.account_id)
+                == "missing"
+            ):
                 state["bucket"] = ""
                 save_state(state, runs_dir, stack)
             raise
@@ -739,13 +1291,42 @@ def up_alpha(
                 }
             ]
         )
+        launch_tags = [
+            tag_spec(
+                "instance",
+                stack,
+                identity,
+                identity.resource_name(f"{stack}-worker"),
+            ),
+            tag_spec(
+                "volume",
+                stack,
+                identity,
+                identity.resource_name(f"{stack}-root"),
+            ),
+            tag_spec(
+                "network-interface",
+                stack,
+                identity,
+                identity.resource_name(f"{stack}-network"),
+            ),
+        ]
+        if spot:
+            launch_tags.append(
+                tag_spec(
+                    "spot-instances-request",
+                    stack,
+                    identity,
+                    identity.resource_name(f"{stack}-spot-request"),
+                )
+            )
         run_args = [
             "ec2",
             "run-instances",
             "--image-id",
             resolved_ami,
             "--instance-type",
-            instance_type,
+            DEFAULT_INSTANCE_TYPE,
             "--count",
             "1",
             "--key-name",
@@ -756,9 +1337,10 @@ def up_alpha(
             bdm,
             "--user-data",
             f"file://{ud_path}",
+            "--instance-initiated-shutdown-behavior",
+            "terminate",
             "--tag-specifications",
-            tag_spec("instance", stack),
-            tag_spec("volume", stack),
+            *launch_tags,
         ]
         if subnet_id:
             run_args.extend(["--subnet-id", subnet_id])
@@ -769,8 +1351,8 @@ def up_alpha(
                     "MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}",
                 ]
             )
-        else:
-            run_args.extend(["--instance-initiated-shutdown-behavior", "terminate"])
+        if re.fullmatch(r"t[23]a?\..+", DEFAULT_INSTANCE_TYPE):
+            run_args.extend(["--credit-specification", "CpuCredits=standard"])
         launched = aws.call_json(run_args)
     finally:
         ud_path.unlink(missing_ok=True)
@@ -791,51 +1373,146 @@ def up_alpha(
     print(
         f"alpha stack {stack!r} is UP in {aws.region}: instance={instance_id} ip={public_ip} "
         f"bucket={bucket_name or '(none)'}\n"
-        f"Collapse everything after testing with: ./leaderboard/aws_alpha.sh collapse --stack {stack}",
+        "Collapse everything after testing with: ./leaderboard/aws_alpha.sh collapse "
+        f"--daplab-project {shlex.quote(identity.project)} "
+        f"--owner {shlex.quote(identity.owner)} "
+        f"--daplab-account-id {shlex.quote(identity.account_id)} "
+        f"--stack {shlex.quote(stack)}",
         flush=True,
     )
     return state
 
 
+def delete_bucket_objects(
+    aws: AwsCli,
+    bucket: str,
+    objects: list[dict[str, str]],
+    identity: DaplabIdentity,
+) -> None:
+    for index in range(0, len(objects), 1000):
+        batch = json.dumps(
+            {"Objects": objects[index : index + 1000], "Quiet": True}
+        )
+        result = aws.call_json(
+            [
+                "s3api",
+                "delete-objects",
+                "--bucket",
+                bucket,
+                "--delete",
+                batch,
+                "--expected-bucket-owner",
+                identity.account_id,
+            ]
+        )
+        if result.get("Errors"):
+            raise AlphaError(
+                f"S3 reported object deletion errors for {bucket!r}: "
+                f"{result['Errors']!r}"
+            )
+
+
+def sync_site_bucket(
+    aws: AwsCli,
+    source: Path,
+    bucket: str,
+    identity: DaplabIdentity,
+) -> None:
+    """Upload one static site and remove stale keys with account-bound S3 calls."""
+    local_files: dict[str, Path] = {}
+    for path in sorted(source.rglob("*")):
+        if path.is_symlink():
+            raise AlphaError(f"refusing to upload symlink from alpha site: {path}")
+        if path.is_file():
+            local_files[path.relative_to(source).as_posix()] = path
+
+    listed = aws.call_json(
+        [
+            "s3api",
+            "list-objects-v2",
+            "--bucket",
+            bucket,
+            "--expected-bucket-owner",
+            identity.account_id,
+        ]
+    )
+    remote_keys = {
+        str(item.get("Key") or "")
+        for item in (listed.get("Contents") or [])
+        if item.get("Key")
+    }
+    for key, path in local_files.items():
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        aws.call_text(
+            [
+                "s3api",
+                "put-object",
+                "--bucket",
+                bucket,
+                "--key",
+                key,
+                "--body",
+                str(path),
+                "--content-type",
+                content_type,
+                "--expected-bucket-owner",
+                identity.account_id,
+            ]
+        )
+
+    stale = sorted(remote_keys - local_files.keys())
+    delete_bucket_objects(
+        aws,
+        bucket,
+        [{"Key": key} for key in stale],
+        identity,
+    )
+
+
 def deploy_alpha_site(
     *,
     aws: AwsCli,
+    identity: DaplabIdentity,
     stack: str = DEFAULT_STACK,
     bucket: str = "",
     board: Path = BOARD,
     runs_dir: Path = RUNS,
 ) -> dict[str, Any]:
     validate_stack(stack)
-    target = site.assemble("alpha", board)
+    verify_alpha_region(aws)
     state = load_state(runs_dir, stack)
+    verify_state_identity(state, identity)
+    verify_state_target(state, region=aws.region)
     target_bucket = bucket.strip() or str(state.get("bucket") or "")
+    target = board / ".site" / "alpha"
     if aws.dry_run:
         plan = {
             "action": "deploy-site",
             "dry_run": True,
             "phase": "alpha",
             "stack": stack,
+            "daplab_project": identity.project,
+            "billing_tag1": identity.owner,
+            "account_id": identity.account_id,
             "site_dir": str(target),
             "bucket": target_bucket or None,
         }
         print(json.dumps(plan, indent=2))
         return plan
+    require_caller_owner(aws, identity)
+    verify_state_target(state, region=aws.region)
     if not target_bucket:
         raise AlphaError(
             f"no alpha S3 bucket recorded for stack {stack!r}; pass --bucket <name> or run 'up' without --no-bucket"
         )
-    if _classify_head_bucket(aws, target_bucket) != "exists":
+    target = site.assemble("alpha", board)
+    if (
+        _classify_head_bucket(aws, target_bucket, identity.account_id)
+        != "exists"
+    ):
         raise AlphaError(f"S3 bucket {target_bucket!r} does not exist; run 'up' first")
-    verify_bucket_ownership(aws, stack, target_bucket)
-    aws.call_text(
-        [
-            "s3",
-            "sync",
-            f"{target}/",
-            f"s3://{target_bucket}/",
-            "--delete",
-        ]
-    )
+    verify_bucket_ownership(aws, stack, target_bucket, identity)
+    sync_site_bucket(aws, target, target_bucket, identity)
     presigned = aws.call_text(
         [
             "s3",
@@ -855,6 +1532,9 @@ def deploy_alpha_site(
     result = {
         "phase": "alpha",
         "stack": stack,
+        "daplab_project": identity.project,
+        "billing_tag1": identity.owner,
+        "account_id": identity.account_id,
         "site_dir": str(target),
         "bucket": target_bucket,
         "website_url": website_url,
@@ -912,10 +1592,6 @@ def write_sync_filelist(runs_dir: Path, stack: str, root: Path = ROOT) -> Path:
             for child in sorted(gd_path.rglob("*")):
                 if child.is_file() and not child.is_symlink() and not child.name.endswith(".tmp"):
                     tracked.append(child.relative_to(root).as_posix())
-    dataset_rel = "leaderboard/data/tpcc_10w.sql"
-    dataset_path = root / dataset_rel
-    if dataset_path.is_file() and not dataset_path.is_symlink() and dataset_rel not in tracked:
-        tracked.append(dataset_rel)
     if not tracked:
         raise AlphaError(f"git ls-files returned no syncable files in {root}")
     filelist_path.write_text("\n".join(dict.fromkeys(tracked)) + "\n", encoding="utf-8")
@@ -1061,6 +1737,7 @@ def _is_linux_x86_64_elf(path: Path) -> bool:
 def run_alpha_benchmarks(
     *,
     aws: AwsCli,
+    identity: DaplabIdentity,
     stack: str = DEFAULT_STACK,
     preset: str = "mini",
     lane: str = "all",
@@ -1076,6 +1753,7 @@ def run_alpha_benchmarks(
     cmd_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> int:
     validate_stack(stack)
+    verify_alpha_region(aws)
     if preset not in ("mini", "full"):
         raise AlphaError(f"--preset must be mini or full, got {preset!r}")
     if lane not in ("all", "micro", "macro"):
@@ -1088,8 +1766,9 @@ def run_alpha_benchmarks(
     if profile_mode not in ("economic", "economic_single_vm"):
         raise AlphaError(f"--profile-mode must be economic, got {profile_mode!r}")
     state = load_state(runs_dir, stack)
-    public_ip = str(state.get("public_ip") or "")
-    key_path = str(state.get("key_path") or key_file_path(runs_dir, stack))
+    verify_state_identity(state, identity)
+    verify_state_target(state, region=aws.region)
+    key_path = str(key_file_path(runs_dir, stack))
     machine_label = machine.strip() or str(state.get("machine") or default_machine_label(DEFAULT_INSTANCE_TYPE, aws.region))
     if not MACHINE_RE.fullmatch(machine_label):
         raise AlphaError(f"invalid --machine {machine_label!r}")
@@ -1118,8 +1797,11 @@ def run_alpha_benchmarks(
             "dry_run": True,
             "phase": "alpha",
             "stack": stack,
+            "daplab_project": identity.project,
+            "billing_tag1": identity.owner,
+            "account_id": identity.account_id,
             "profile_mode": profile_mode,
-            "public_ip": public_ip or "<from-state>",
+            "public_ip": "<verified from the owned EC2 instance during a live run>",
             "remote_cmd": shlex.join(worker_cmd),
             "deploy_site_after": deploy_site_after,
             "collapse_after": collapse_after,
@@ -1127,8 +1809,10 @@ def run_alpha_benchmarks(
         print(json.dumps(plan, indent=2))
         return 0
 
-    if not public_ip:
-        raise AlphaError(f"no running alpha instance public_ip in state for stack {stack!r}; run 'up' first")
+    require_caller_owner(aws, identity)
+    verify_state_target(state, region=aws.region)
+    owned_instance = running_owned_instance(aws, stack, state, identity)
+    public_ip = owned_instance["public_ip"]
     if not Path(key_path).is_file():
         raise AlphaError(f"SSH key {key_path} not found; run 'up' or 'collapse' first")
 
@@ -1213,7 +1897,6 @@ def run_alpha_benchmarks(
                 f"timed out waiting for cloud-init bootstrap (/var/lib/branchbench-alpha-ready) on {ssh_target}"
             )
         lease_acquired = True
-        collapse_armed = True
 
         # 2. Sync only git-tracked regular files and safe .git metadata into per-invocation staging dir (portable across GNU rsync and macOS openrsync)
         filelist_path = write_sync_filelist(runs_dir, stack, ROOT)
@@ -1335,12 +2018,22 @@ def run_alpha_benchmarks(
             f"{board}/",
         ]
         if cmd_runner(pull_cmd).returncode != 0:
-            raise AlphaError(f"failed to pull results from {ssh_target}")
+            raise AlphaError(
+                f"failed to pull results from {ssh_target}; the worker and state were "
+                "retained, but the dead-man shutdown remains armed, so retry recovery promptly"
+            )
+        collapse_armed = True
 
         # 5. Build local leaderboard/.site/alpha
         site.assemble("alpha", board)
         if deploy_site_after and state.get("bucket"):
-            deploy_alpha_site(aws=aws, stack=stack, board=board, runs_dir=runs_dir)
+            deploy_alpha_site(
+                aws=aws,
+                identity=identity,
+                stack=stack,
+                board=board,
+                runs_dir=runs_dir,
+            )
 
         rc = run_res.returncode
     finally:
@@ -1375,7 +2068,14 @@ def run_alpha_benchmarks(
                     file=sys.stderr,
                 )
         if collapse_after and collapse_armed and release_rc == 0:
-            col_res = collapse_alpha(aws=aws, stack=stack, board=board, runs_dir=runs_dir, keep_local_site=True)
+            col_res = collapse_alpha(
+                aws=aws,
+                identity=identity,
+                stack=stack,
+                board=board,
+                runs_dir=runs_dir,
+                keep_local_site=True,
+            )
             if not col_res.get("collapsed", True):
                 collapse_failed = True
     if release_rc != 0 and rc == 0:
@@ -1386,17 +2086,24 @@ def run_alpha_benchmarks(
 def status_alpha(
     *,
     aws: AwsCli,
+    identity: DaplabIdentity,
     stack: str = DEFAULT_STACK,
     board: Path = BOARD,
     runs_dir: Path = RUNS,
 ) -> dict[str, Any]:
     validate_stack(stack)
+    verify_alpha_region(aws)
     state = load_state(runs_dir, stack)
+    verify_state_identity(state, identity)
+    verify_state_target(state, region=aws.region)
     alpha_site = board / ".site" / "alpha"
     if aws.dry_run:
         info = {
             "phase": "alpha",
             "stack": stack,
+            "daplab_project": identity.project,
+            "billing_tag1": identity.owner,
+            "account_id": identity.account_id,
             "dry_run": True,
             "state_file_exists": state_file_path(runs_dir, stack).is_file(),
             "local_alpha_site_exists": alpha_site.is_dir(),
@@ -1405,26 +2112,44 @@ def status_alpha(
         print(json.dumps(info, indent=2))
         return info
 
-    discovered = discover_stack_resources(aws, stack, state)
+    require_caller_owner(aws, identity)
+    verify_state_target(state, region=aws.region)
+    discovered = discover_stack_resources(aws, stack, state, identity)
     candidate_buckets = discovered.get("buckets") or ([discovered["bucket"]] if discovered.get("bucket") else [])
-    existing_buckets = [b for b in candidate_buckets if _classify_head_bucket(aws, b) == "exists"]
+    existing_buckets = [
+        bucket
+        for bucket in candidate_buckets
+        if _classify_head_bucket(aws, bucket, identity.account_id) == "exists"
+    ]
     unverified_buckets = list(discovered.get("unverified_buckets") or [])
+    unverified_resources = list(discovered.get("unverified_resources") or [])
+    wrong_region_buckets = list(discovered.get("wrong_region_buckets") or [])
     bucket_discovery_error = str(discovered.get("bucket_discovery_error") or "")
-    bucket_exists = bool(existing_buckets or unverified_buckets or bucket_discovery_error)
+    bucket_exists = bool(
+        existing_buckets
+        or unverified_buckets
+        or wrong_region_buckets
+        or bucket_discovery_error
+    )
     active_compute = any(
         i["state"] in ("pending", "running", "stopping", "stopped") for i in discovered["instances"]
     )
     report = {
         "phase": "alpha",
         "stack": stack,
+        "daplab_project": identity.project,
+        "billing_tag1": identity.owner,
+        "account_id": identity.account_id,
         "region": aws.region,
         "instances": discovered["instances"],
         "volumes": discovered["volumes"],
         "security_groups": discovered["security_groups"],
         "key_pairs": discovered["key_pairs"],
+        "unverified_resources": unverified_resources,
         "bucket": existing_buckets[0] if existing_buckets else None,
         "buckets": existing_buckets,
         "unverified_buckets": unverified_buckets,
+        "wrong_region_buckets": wrong_region_buckets,
         "bucket_discovery_error": bucket_discovery_error or None,
         "local_alpha_site": str(alpha_site) if alpha_site.is_dir() else None,
         "state_file": str(state_file_path(runs_dir, stack)) if state_file_path(runs_dir, stack).is_file() else None,
@@ -1433,6 +2158,7 @@ def status_alpha(
             or discovered["volumes"]
             or discovered["security_groups"]
             or discovered["key_pairs"]
+            or unverified_resources
             or bucket_exists
         ),
     }
@@ -1440,23 +2166,57 @@ def status_alpha(
     return report
 
 
-def _empty_and_delete_bucket(aws: AwsCli, bucket: str, stack: str = DEFAULT_STACK) -> bool:
+def _empty_and_delete_bucket(
+    aws: AwsCli,
+    bucket: str,
+    identity: DaplabIdentity,
+    stack: str = DEFAULT_STACK,
+) -> bool:
     try:
-        bstate = _classify_head_bucket(aws, bucket)
+        bstate = _classify_head_bucket(aws, bucket, identity.account_id)
     except AlphaError:
         return False
     if bstate == "missing":
         return True
     try:
-        verify_bucket_ownership(aws, stack, bucket)
+        verify_bucket_ownership(aws, stack, bucket, identity)
     except AlphaError:
         return False
-    rm_res = aws.call_text(["s3", "rm", f"s3://{bucket}", "--recursive"], check=False)
-    if rm_res.returncode != 0:
+    try:
+        current = aws.call_json(
+            [
+                "s3api",
+                "list-objects-v2",
+                "--bucket",
+                bucket,
+                "--expected-bucket-owner",
+                identity.account_id,
+            ]
+        )
+        delete_bucket_objects(
+            aws,
+            bucket,
+            [
+                {"Key": str(item["Key"])}
+                for item in (current.get("Contents") or [])
+                if item.get("Key")
+            ],
+            identity,
+        )
+    except AlphaError:
         return False
     for _ in range(10):
         try:
-            versions = aws.call_json(["s3api", "list-object-versions", "--bucket", bucket])
+            versions = aws.call_json(
+                [
+                    "s3api",
+                    "list-object-versions",
+                    "--bucket",
+                    bucket,
+                    "--expected-bucket-owner",
+                    identity.account_id,
+                ]
+            )
         except AlphaError:
             return False
         objs = [
@@ -1467,23 +2227,30 @@ def _empty_and_delete_bucket(aws: AwsCli, bucket: str, stack: str = DEFAULT_STAC
         ]
         if not objs:
             break
-        for idx in range(0, len(objs), 500):
-            batch = json.dumps({"Objects": objs[idx : idx + 500], "Quiet": True})
-            del_obj = aws.call_text(
-                ["s3api", "delete-objects", "--bucket", bucket, "--delete", batch],
-                check=False,
-            )
-            if del_obj.returncode != 0:
-                return False
+        try:
+            delete_bucket_objects(aws, bucket, objs, identity)
+        except AlphaError:
+            return False
         if not versions.get("IsTruncated"):
             break
-    del_res = aws.call_text(["s3api", "delete-bucket", "--bucket", bucket], check=False)
+    del_res = aws.call_text(
+        [
+            "s3api",
+            "delete-bucket",
+            "--bucket",
+            bucket,
+            "--expected-bucket-owner",
+            identity.account_id,
+        ],
+        check=False,
+    )
     return del_res.returncode == 0
 
 
 def collapse_alpha(
     *,
     aws: AwsCli,
+    identity: DaplabIdentity,
     stack: str = DEFAULT_STACK,
     keep_bucket: bool = False,
     keep_local_site: bool = False,
@@ -1492,7 +2259,10 @@ def collapse_alpha(
 ) -> dict[str, Any]:
     """Tear down every AWS and local resource created by the alpha phase for <stack>."""
     validate_stack(stack)
+    verify_alpha_region(aws)
     state = load_state(runs_dir, stack)
+    verify_state_identity(state, identity)
+    verify_state_target(state, region=aws.region)
     spath = state_file_path(runs_dir, stack)
     kpath = key_file_path(runs_dir, stack)
     alpha_site = board / ".site" / "alpha"
@@ -1503,18 +2273,25 @@ def collapse_alpha(
             "dry_run": True,
             "phase": "alpha",
             "stack": stack,
+            "daplab_project": identity.project,
+            "billing_tag1": identity.owner,
+            "account_id": identity.account_id,
             "region": aws.region,
-            "terminate_instance_id": state.get("instance_id"),
-            "delete_security_group_id": state.get("security_group_id"),
-            "delete_key_name": state.get("key_name") or f"{stack}-key",
-            "delete_bucket": None if keep_bucket else state.get("bucket"),
+            "recorded_instance_id": state.get("instance_id"),
+            "recorded_security_group_id": state.get("security_group_id"),
+            "recorded_key_name": state.get("key_name"),
+            "recorded_bucket": state.get("bucket"),
+            "keep_bucket": keep_bucket,
+            "ownership_check": "Live collapse deletes only resources with matching AWS ownership tags.",
             "remove_local_alpha_site": not keep_local_site,
             "remove_state_file": str(spath),
         }
         print(json.dumps(plan, indent=2))
         return plan
 
-    discovered = discover_stack_resources(aws, stack, state)
+    caller = require_caller_owner(aws, identity)
+    verify_state_target(state, region=aws.region)
+    discovered = discover_stack_resources(aws, stack, state, identity)
     instance_ids = [i["instance_id"] for i in discovered["instances"]]
     if instance_ids:
         aws.call_text(["ec2", "terminate-instances", "--instance-ids", *instance_ids])
@@ -1526,9 +2303,7 @@ def collapse_alpha(
             "ec2",
             "describe-volumes",
             "--filters",
-            "Name=tag:Project,Values=BranchBenchLeaderboard",
-            "Name=tag:Phase,Values=alpha",
-            f"Name=tag:Stack,Values={stack}",
+            *ownership_filters(stack, identity),
         ]
     )
     volume_ids = [str(v["VolumeId"]) for v in (vol_resp.get("Volumes") or []) if v.get("VolumeId")]
@@ -1548,7 +2323,7 @@ def collapse_alpha(
         else:
             remaining_sgs.append(sg_id)
 
-    key_names = list(dict.fromkeys([*discovered["key_pairs"], f"{stack}-key"]))
+    key_names = discovered["key_pairs"]
     deleted_keys: list[str] = []
     remaining_keys: list[str] = []
     for kname in key_names:
@@ -1559,43 +2334,66 @@ def collapse_alpha(
 
     candidate_buckets = discovered.get("buckets") or ([discovered["bucket"]] if discovered.get("bucket") else [])
     unverified_buckets = list(discovered.get("unverified_buckets") or [])
+    unverified_resources = list(discovered.get("unverified_resources") or [])
+    wrong_region_buckets = list(discovered.get("wrong_region_buckets") or [])
     bucket_discovery_error = str(discovered.get("bucket_discovery_error") or "")
     deleted_buckets: list[str] = []
     remaining_buckets: list[str] = list(candidate_buckets) if keep_bucket else []
     if not keep_bucket:
         for b_name in candidate_buckets:
-            if _empty_and_delete_bucket(aws, b_name, stack=stack):
+            if _empty_and_delete_bucket(aws, b_name, identity, stack=stack):
                 deleted_buckets.append(b_name)
             else:
                 remaining_buckets.append(b_name)
-        for ub in unverified_buckets:
-            if ub not in remaining_buckets:
-                remaining_buckets.append(ub)
+    for unresolved in [
+        *unverified_buckets,
+        *(item["bucket"] for item in wrong_region_buckets),
+    ]:
+        if unresolved not in remaining_buckets:
+            remaining_buckets.append(unresolved)
     deleted_bucket = deleted_buckets[0] if deleted_buckets else None
     remaining_bucket = remaining_buckets[0] if remaining_buckets else ""
-
-    if not remaining_keys:
-        kpath.unlink(missing_ok=True)
-        if state.get("key_path"):
-            Path(str(state["key_path"])).unlink(missing_ok=True)
 
     has_remaining = bool(
         remaining_volumes
         or remaining_sgs
         or remaining_keys
+        or unverified_resources
         or remaining_buckets
-        or (not keep_bucket and bucket_discovery_error)
+        or bucket_discovery_error
     )
     if has_remaining:
-        updated = dict(state)
-        updated["instance_id"] = ""
+        updated = {
+            **state,
+            "phase": "alpha",
+            "stack": stack,
+            "daplab_project": identity.project,
+            "billing_tag1": identity.owner,
+            "region": aws.region,
+            "account_id": caller["account_id"],
+        }
+        unverified_types = {item["type"] for item in unverified_resources}
+        updated["instance_id"] = (
+            str(state.get("instance_id") or "")
+            if "instance" in unverified_types
+            else ""
+        )
         updated["public_ip"] = ""
-        updated["security_group_id"] = remaining_sgs[0] if remaining_sgs else ""
-        updated["key_name"] = remaining_keys[0] if remaining_keys else ""
+        updated["security_group_id"] = (
+            str(state.get("security_group_id") or "")
+            if "security_group" in unverified_types
+            else (remaining_sgs[0] if remaining_sgs else "")
+        )
+        updated["key_name"] = (
+            str(state.get("key_name") or "")
+            if "key_pair" in unverified_types
+            else (remaining_keys[0] if remaining_keys else "")
+        )
         updated["bucket"] = remaining_bucket
         save_state(updated, runs_dir, stack)
     else:
         spath.unlink(missing_ok=True)
+        kpath.unlink(missing_ok=True)
 
     if not keep_local_site and alpha_site.is_dir() and not alpha_site.is_symlink():
         shutil.rmtree(alpha_site)
@@ -1604,6 +2402,9 @@ def collapse_alpha(
         "action": "collapse",
         "phase": "alpha",
         "stack": stack,
+        "daplab_project": identity.project,
+        "billing_tag1": identity.owner,
+        "account_id": identity.account_id,
         "region": aws.region,
         "collapsed": not has_remaining,
         "terminated_instances": instance_ids,
@@ -1615,8 +2416,11 @@ def collapse_alpha(
         "remaining_volumes": remaining_volumes,
         "remaining_security_groups": remaining_sgs,
         "remaining_key_pairs": remaining_keys,
+        "unverified_resources": unverified_resources,
         "remaining_bucket": remaining_bucket or None,
         "remaining_buckets": remaining_buckets,
+        "unverified_buckets": unverified_buckets,
+        "wrong_region_buckets": wrong_region_buckets,
         "bucket_discovery_error": bucket_discovery_error or None,
         "local_alpha_site_removed": not keep_local_site and not alpha_site.exists(),
         "state_file_removed": not spath.exists(),
@@ -1634,9 +2438,24 @@ def collapse_alpha(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aws_alpha",
-        description="Provision, run, deploy, inspect, and collapse the personal-AWS 'alpha' leaderboard phase.",
+        description="Provision, run, deploy, inspect, and collapse the DAPLab AWS 'alpha' leaderboard phase.",
     )
     common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--daplab-project",
+        required=True,
+        help="Exact project tag registered in DAPLab AWS member info",
+    )
+    common.add_argument(
+        "--owner",
+        required=True,
+        help="DAPLab AWS username or UNI used for billing-tag1",
+    )
+    common.add_argument(
+        "--daplab-account-id",
+        required=True,
+        help="Expected 12-digit DAPLab shared AWS account ID",
+    )
     common.add_argument("--stack", default=DEFAULT_STACK, help=f"Alpha stack name (default: {DEFAULT_STACK})")
     common.add_argument(
         "--region",
@@ -1649,12 +2468,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     up = sub.add_parser("up", parents=[common], help="Provision the collapsible alpha EC2 worker and S3 bucket")
-    up.add_argument("--instance-type", default=DEFAULT_INSTANCE_TYPE, help=f"EC2 instance type (default: {DEFAULT_INSTANCE_TYPE})")
     up.add_argument("--ami-id", default="", help="Explicit Ubuntu 24.04 x86_64 AMI ID (default: auto-resolve via SSM)")
     up.add_argument("--ssh-cidr", default="", help="Allowed inbound SSH IPv4 CIDR (default: auto-detect caller /32)")
     up.add_argument("--vpc-id", default="", help="Optional VPC ID for the security group")
     up.add_argument("--subnet-id", default="", help="Optional subnet ID for the EC2 instance")
-    up.add_argument("--spot", action="store_true", help="Launch as a one-time EC2 Spot instance (~60-70%% cheaper)")
+    up.add_argument(
+        "--spot",
+        action="store_true",
+        help="Launch as a one-time Spot instance when interruption and rerun are acceptable",
+    )
     up.add_argument("--root-gb", type=int, default=DEFAULT_ROOT_GB, help=f"Root gp3 EBS size in GiB (default: {DEFAULT_ROOT_GB})")
     up.add_argument("--bucket", default="", help="Explicit S3 bucket name for hosting .site/alpha")
     up.add_argument("--no-bucket", action="store_true", help="Do not create an S3 bucket (compute worker only)")
@@ -1694,11 +2516,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     aws = AwsCli(region=args.region, profile=args.profile, dry_run=args.dry_run)
     try:
+        identity = DaplabIdentity(
+            args.daplab_project,
+            args.owner,
+            args.daplab_account_id,
+        )
         if args.command == "up":
             up_alpha(
                 aws=aws,
+                identity=identity,
                 stack=args.stack,
-                instance_type=args.instance_type,
                 ami_id=args.ami_id,
                 ssh_cidr=args.ssh_cidr,
                 vpc_id=args.vpc_id,
@@ -1714,6 +2541,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             return run_alpha_benchmarks(
                 aws=aws,
+                identity=identity,
                 stack=args.stack,
                 preset=args.preset,
                 lane=args.lane,
@@ -1726,14 +2554,20 @@ def main(argv: list[str] | None = None) -> int:
                 collapse_after=args.collapse_after,
             )
         if args.command == "deploy-site":
-            deploy_alpha_site(aws=aws, stack=args.stack, bucket=args.bucket)
+            deploy_alpha_site(
+                aws=aws,
+                identity=identity,
+                stack=args.stack,
+                bucket=args.bucket,
+            )
             return 0
         if args.command == "status":
-            status_alpha(aws=aws, stack=args.stack)
+            status_alpha(aws=aws, identity=identity, stack=args.stack)
             return 0
         if args.command in ("collapse", "down", "destroy", "teardown"):
             res = collapse_alpha(
                 aws=aws,
+                identity=identity,
                 stack=args.stack,
                 keep_bucket=args.keep_bucket,
                 keep_local_site=args.keep_local_site,
