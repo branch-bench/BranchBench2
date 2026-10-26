@@ -2,7 +2,7 @@
 
 From the repository root:
     python -m leaderboard.site                  # production: only publish.json's official records
-    python -m leaderboard.site --phase alpha    # personal AWS staging: all validated runs, no mock rows or wizard
+    python -m leaderboard.site --phase alpha    # DAPLab AWS staging: all validated runs, no mock rows or wizard
     python -m leaderboard.site --phase local    # development: everything the builders find here
     LEADERBOARD_PHASE=alpha python -m leaderboard.site
 

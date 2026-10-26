@@ -94,7 +94,7 @@
                                 <rect class="node-warn" x="28" y="152" width="168" height="78" rx="8"/>
                                 <text class="node-title" x="40" y="176">AWS Alpha</text>
                                 <text class="node-warn-ink" x="40" y="196">aws_alpha.sh</text>
-                                <text class="node-sub" x="40" y="214">Collapsible Spot VM</text>
+                                <text class="node-sub" x="40" y="214">On-Demand t3a.xlarge</text>
                             </g>
                             <g class="arch-node" data-stage="1" data-path="prod">
                                 <rect class="node-accent" x="28" y="246" width="168" height="78" rx="8"/>
@@ -246,9 +246,9 @@
                                     <code class="arch-code-pill">python -m leaderboard.serve --phase local</code>
                                 </div>
                                 <div class="arch-detail-box">
-                                    <h4>Personal AWS Staging (<code>alpha</code>)</h4>
-                                    <p>Defaults to a Spot <code>i4i.2xlarge</code> with XFS <code>reflink=1</code> NVMe and private S3, then collapses all resources to <code>$0.00/hr</code>.</p>
-                                    <code class="arch-code-pill">./leaderboard/aws_alpha.sh run --preset mini --collapse-after</code>
+                                    <h4>DAPLab AWS Staging (<code>alpha</code>)</h4>
+                                    <p>Uses one fixed-size <code>t3a.xlarge</code> in <code>us-east-1</code>. It defaults to On-Demand capacity, a 64 GiB encrypted root disk, and private S3. The CLI verifies the shared account ID and IAM username. Alpha timings are not ranked.</p>
+                                    <code class="arch-code-pill">aws_alpha.sh run --daplab-project &lt;project&gt; --owner &lt;uni&gt; --daplab-account-id &lt;account&gt; --collapse-after</code>
                                 </div>
                                 <div class="arch-detail-box">
                                     <h4>Official Cloud Target (<code>prod</code>)</h4>
@@ -358,7 +358,7 @@
                     <ul class="arch-legend" aria-label="Diagram key">
                         <li><span class="arch-swatch"></span> Standard pipeline stage</li>
                         <li><span class="arch-swatch arch-swatch-accent"></span> Official / primary data path</li>
-                        <li><span class="arch-swatch arch-swatch-warn"></span> Personal AWS Alpha staging path</li>
+                        <li><span class="arch-swatch arch-swatch-warn"></span> DAPLab AWS Alpha staging path</li>
                         <li><span class="arch-swatch arch-swatch-code"></span> Pluggable DB adapter boundary</li>
                     </ul>
                 </div>
@@ -456,7 +456,7 @@
                     </div>
                     <div>
                         <dt>AWS Alpha (<code>alpha</code>)</dt>
-                        <dd><code>./leaderboard/aws_alpha.sh {up,run,deploy-site,status,collapse}</code> tags every resource with <code>Project=BranchBenchLeaderboard</code>, <code>Phase=alpha</code>, and <code>Stack=&lt;stack&gt;</code>, stages git-tracked sources with in-place <code>rsync</code> activation preserving lockfile inodes, retains lease ownership through artifact download and collapse, and tears down all cloud resources to <code>$0.00/hr</code>.</dd>
+                        <dd><code>./leaderboard/aws_alpha.sh {up,run,deploy-site,status,collapse}</code> requires the registered <code>project</code> tag, owner <code>billing-tag1</code>, and expected DAPLab account ID. The alpha environment is locked to <code>us-east-1</code>. Resource names follow <code>{project}-{owner}-{purpose}</code>. The worker stages git-tracked sources, retains lease ownership through artifact download, and tears down only resources with matching ownership tags.</dd>
                     </div>
                     <div id="submission-flow">
                         <dt>Official Cloud (<code>prod</code>)</dt>
@@ -468,12 +468,12 @@
             <section class="panel" id="prod-vs-local">
                 <h2>5. Phase Comparison Matrix</h2>
                 <div class="scroll">
-                    <table class="detail-table" aria-label="Comparison between Official Cloud prod, Personal AWS alpha, and Local Dev local phases">
+                    <table class="detail-table" aria-label="Comparison between Official Cloud prod, DAPLab AWS alpha, and Local Dev local phases">
                         <thead>
                             <tr>
                                 <th scope="col">Dimension</th>
                                 <th scope="col">Official Cloud (<code>prod</code>)</th>
-                                <th scope="col">Personal AWS Staging (<code>alpha</code>)</th>
+                                <th scope="col">DAPLab AWS Staging (<code>alpha</code>)</th>
                                 <th scope="col">Local Developer Mode (<code>local</code>)</th>
                             </tr>
                         </thead>
@@ -505,7 +505,7 @@
                             <tr>
                                 <th scope="row">Compute Placement</th>
                                 <td>Planned: one On-Demand <code>m7a.2xlarge</code> plus 200 GiB <code>gp3</code> per self-hosted database; fixed within one cohort</td>
-                                <td>One user-provisioned EC2 worker; <code>i4i.2xlarge</code> is the default</td>
+                                <td>One DAPLab EC2 worker; low-cost smoke profile is fixed to <code>t3a.xlarge</code>; not rankable</td>
                                 <td>Developer workstation</td>
                             </tr>
                             <tr>

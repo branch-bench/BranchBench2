@@ -547,6 +547,13 @@ assert.deepEqual(classNodes(macroEl('macro-breakdowns'), 'breakdown-title').map(
         'architecture.html must preserve the future placement boundary without mixing hardware cohorts',
     );
     assert.match(readme, /All workers in one ranked cohort use this fixed profile\./, 'README.md must document the fixed production cohort');
+    assert.match(readme, /`project` tag and the operator's `billing-tag1`/, 'README.md must document required DAPLab billing tags');
+    assert.match(readme, /does not call a password manager or store AWS credentials/, 'README.md must keep operator credentials outside the project');
+    assert.match(readme, /The alpha phase is locked to `us-east-1`/, 'README.md must lock the DAPLab alpha region');
+    assert.match(arch, /--daplab-account-id &lt;account&gt;/, 'architecture.html must require the expected DAPLab account ID');
+    assert.match(arch, /\{project\}-\{owner\}-\{purpose\}/, 'architecture.html must document DAPLab resource naming');
+    assert.match(arch, /On-Demand t3a\.xlarge/, 'architecture.html must label the default alpha worker as On-Demand');
+    assert.match(arch, /low-cost smoke profile is fixed to <code>t3a\.xlarge<\/code>; not rankable/, 'architecture.html must lock the alpha smoke profile and separate it from ranked production');
     assert.match(requirements, /one On-Demand `m7a\.2xlarge` worker for each database system\./, 'requirements must lock the production instance type');
     assert.match(requirements, /dedicated 200 GiB `gp3` data volume/, 'requirements must lock the production data volume');
     const svgBodies = [...arch.matchAll(/<svg\s+class="arch-svg"[\s\S]*?<\/svg>/g)].map(([s]) => s);

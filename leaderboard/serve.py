@@ -2,7 +2,7 @@
 
 From the repository root:
     python -m leaderboard.serve                 # production preview of leaderboard/.site/prod
-    python -m leaderboard.serve --phase alpha   # personal AWS staging preview of leaderboard/.site/alpha
+    python -m leaderboard.serve --phase alpha   # DAPLab AWS staging preview of leaderboard/.site/alpha
     python -m leaderboard.serve --phase local   # development preview with the Terminal launcher
 
 All assemble the phase's site first (leaderboard.site), then serve only that
