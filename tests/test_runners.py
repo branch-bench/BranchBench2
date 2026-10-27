@@ -159,8 +159,9 @@ def test_macrobench_main_ends_the_run_on_a_failed_check_in_a_worker(tmp_path):
 
 def test_macrobench_main_closes_every_worker_suite_exactly_once(tmp_path):
     """Workers run concurrently on distinct suites of one database. Every suite the run
-    opened is closed exactly once by the time main returns, after a complete run and
-    after a suite could not even be opened for one worker."""
+    opened is closed exactly once, on the thread that opened it, by the time main
+    returns: after a complete run, and after worker 2's suite factory raised once
+    worker 1 had constructed and recorded its suite."""
     class Connection(FakeSuite):
         """One shared in-memory database; each instance is its own connection to it and
         records the thread that opened it and every thread that closed it."""
@@ -184,20 +185,24 @@ def test_macrobench_main_closes_every_worker_suite_exactly_once(tmp_path):
                 Connection.live -= 1
 
     def run(name, fail_second_worker=False):
-        """rl_env on two concurrent workers. With fail_second_worker the two worker suites
-        are requested together (worker_index 1 and 2 meet at a barrier), the first opens
-        and the second request raises, so one worker suite is open when another worker's
-        factory fails."""
+        """rl_env on two concurrent workers. With fail_second_worker the requests with
+        worker_index 1 and 2 meet at a barrier, so they come from the two workers. Worker 1
+        then constructs and records its suite and sets an event, and worker 2 waits for
+        that event before its factory raises."""
         Connection.shared, Connection.live, Connection.peak = None, 0, 0
         opened, both_requested = [], threading.Barrier(2, timeout=10)
+        worker_1_recorded = threading.Event()
 
         def open_suite(request: SuiteRequest):
             if fail_second_worker and request.worker_index in (1, 2):
                 both_requested.wait()
                 if request.worker_index == 2:
+                    assert worker_1_recorded.wait(10), "worker 1 recorded its suite"
                     raise RuntimeError("simulated connection failure")
             suite = Connection(request.result_collector)
             opened.append(suite)
+            if request.worker_index == 1:
+                worker_1_recorded.set()
             return suite
 
         config = tmp_path / f"{name}.textproto"
@@ -215,7 +220,7 @@ def test_macrobench_main_closes_every_worker_suite_exactly_once(tmp_path):
 
     e2e, opened = run("bb_pool_fail", fail_second_worker=True)
     assert e2e["status"].startswith("crashed: RuntimeError: simulated connection failure")
-    assert len(opened) >= 2, "the setup suite and the first worker suite were open when the second worker's factory failed"
+    assert len(opened) >= 2, "the setup suite and worker 1's suite were recorded"
 
 
 def test_macrobench_main_counts_each_data_agent_step_once_after_a_reset(tmp_path):
