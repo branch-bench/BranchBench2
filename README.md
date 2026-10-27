@@ -8,15 +8,20 @@ dataset. Every operation is timed and storage-measured; an operation that
 errors is recorded and the workload goes on, while one the adapter cannot
 perform ends the run as unsupported, naming the verb.
 
-This package owns no concrete adapter, no database lifecycle (provisioning,
-loading, start and stop, deletion), no vendor SDK or hosted-service
-dependency, and no system selection. An embedding application (the
-BranchBench leaderboard) implements one `DBToolSuite` adapter per system,
-provisions a database, and hands the runners a prepared target. The engine
-does contain cross-dialect workload behaviour: the scenarios, the schema
-loader and the CH-benCHmark loaders issue SQL for both the Postgres and the
-MySQL dialect, and `util/` depends on the generic `psycopg2` and `pymysql`
-drivers for that.
+This repository also owns the concrete database adapters, reusable database
+connectors, and standalone benchmark commands. A connector creates or opens
+a database, loads data, and supplies a `PreparedTarget` to the abstract
+runners. The runners do not select database vendors. The CLI selects a
+connector and applies the configured cleanup policy.
+
+The engine works without a leaderboard checkout. The separate
+[leaderboard application](https://github.com/branch-bench/BranchBench2-Leaderboard)
+imports this package and owns server scripts, run recovery, AWS workers,
+maintainer-merge automation, validation, publication, and the website.
+The engine contains no leaderboard, GitHub Actions, AWS worker, or S3 code.
+
+See [ownership requirements](requirements/README.md) and the
+[database contribution guide](CONTRIBUTING.md).
 
 ## Quick Start
 
@@ -25,23 +30,47 @@ drivers for that.
 #    https://docs.astral.sh/uv/). The build compiles the .proto files.
 uv sync --frozen
 
-# 2. Run the unit tests (an in-memory sqlite adapter, no server needed)
-uv run --frozen python -m pytest tests
+# 2. Check the standalone commands without connecting to a database
+uv run --frozen python -m microbench.runner2 --help
+uv run --frozen python -m macrobench.runner --help
+uv run --frozen python -m microbench.verbs --help
 
-# 3. Build the distributable wheel and sdist
+# 3. Run the prepared-target tests (no database server needed)
+uv run --frozen python -m pytest tests/test_runners.py
+
+# 4. Build the distributable wheel and sdist
 uv build
 ```
+
+For a real run, install and start the selected database, set its connection
+variables, and select the backend explicitly. Supply `--db-name` unless
+the config sets `database_setup.db_name`. For example:
+
+```bash
+uv run --frozen python -m macrobench.runner \
+  --config macrobench/configs/rl_env_mini.textproto \
+  --backend dolt --db-name branchbench_local --outdir run_stats/local
+```
+
+Use a disposable benchmark database. The microbench and macrobench CLIs honor `database_setup.cleanup`
+and the configured database source. Keep `cleanup: false` when you need to
+retain the database. `cleanup: true` can delete an existing database too.
+The workload can change its contents. Hosted providers also need credentials in the process
+environment. Fetch secrets from Bitwarden at point of use; do not save them
+in configuration files.
 
 ### Repository Layout
 
 ```
-dblib/              # The git-like DB API, the prepared-target seam, result collection
+dblib/              # DB API, concrete adapters, prepared targets, result collection
+dblib/connectors/   # Provider database creation, loading, target factories and deletion
 microbench/         # Microbenchmark runner, its operations, and the branch-verb grid
 macrobench/         # Macrobenchmark scenarios, schema generators, configs and runner
 util/               # Shared helpers (SQL loading, DB utilities)
 db_setup/           # The CH-benCHmark schema and seed dataset, plus loader scripts
 scripts/plotting/   # Plotting and analysis scripts (optional extra: plotting)
-tests/              # Tests against the in-memory fake adapter
+tests/              # Runner, connector and adapter tests; live tests require servers
+requirements/       # Ownership and standalone execution requirements
 run_stats_final/    # Result artifacts of the paper's runs
 ```
 
@@ -52,36 +81,36 @@ The seam between an application and the engine is three frozen dataclasses in
 
 | Type | Who creates it | What it holds |
 |------|----------------|---------------|
-| `PreparedTarget` | the application, after provisioning a database | `root_ref` (the branch a run starts on), `suite_type` (the adapter class, for its capability report) and `open_suite`, a callable that opens one adapter instance for one worker |
+| `PreparedTarget` | a connector or embedding application | `root_ref` (the branch a run starts on), `suite_type` (the adapter class, for its capability report) and `open_suite`, a callable that opens one adapter instance for one worker |
 | `SuiteRequest` | the engine, once per worker | the shared `ResultCollector`, the `initial_ref` to connect to, the `worker_index`, the refs created during untimed setup and whether to measure storage per operation |
 | `ExecutionState` | the microbench runner | the working ref and the setup refs after the untimed setup phase |
 
-The application calls one of three entry points with its target:
+The CLI and embedding applications use the same three execution entry points:
 
 ```python
-from dblib.target import PreparedTarget, SuiteRequest
+from dblib.connector import load_connector
 from macrobench import runner as macro_runner
-from microbench import runner2
-from microbench.verbs import driver
-
-
-def open_suite(request: SuiteRequest):
-    return MySuite.init_for_bench(request.result_collector, db_name, request.initial_ref,
-                                  request.measure_storage)
-
-
-target = PreparedTarget(root_ref="main", suite_type=MySuite, open_suite=open_suite)
-runner2.run(task_config, target, "MySystem", output_dir)                       # one microbench operation
-macro_runner.main(["--config", preset, "--outdir", out], target=target, system_name="MySystem")  # one S1-S6 scenario
-driver.main(["--scale", "1", "--outdir", out], target=target, system_name="MySystem")           # the verb grid
+connector = load_connector("dolt")
+database = connector.provision("branchbench_example")
+try:
+    target = connector.prepare_target(database)
+    e2e = macro_runner.run(
+        ["--config", "macrobench/configs/rl_env_mini.textproto", "--outdir", "run_stats/example"],
+        target=target, system_name="Doltgres",
+    )
+finally:
+    connector.delete_database(database)
 ```
 
-Provisioning, loading a dump, credentials, and deleting the database afterwards
-are the application's responsibilities. The engine reads no environment
-variable of its own except `DBFORK_NATIVE_ONLY` (see `dblib/db_api.py`:
-native-only mode reports and runs every simulated verb as unsupported) and
-`MACRO_SPILL_ROWS` (rows the macrobench collector keeps in memory before
-spilling to parquet).
+The other entry points are `runner2.run(task, target, system_name, output_dir)`
+and `driver.run(argv, target=target, system_name=system_name)`. The caller owns
+the database lifetime when it uses these functions. Built-in connectors
+provide the reusable provider operations. A custom caller can still supply
+its own `PreparedTarget` without changing the runners.
+
+Adapters read provider connection settings from the process environment.
+`DBFORK_NATIVE_ONLY` reports simulated verbs as unsupported.
+`MACRO_SPILL_ROWS` controls when the macrobench collector spills rows to parquet.
 
 Packaged resources: the macrobench presets
 (`importlib.resources.files("macrobench") / "configs"`), the scenario schemas
@@ -103,12 +132,12 @@ protobuf modules. `build_protos.py` compiles the `.proto` files with
 
 ## Database API
 
-`dblib/db_api.py` defines `DBToolSuite`, the one adapter base class every
-database system implements (in the embedding application, not here). An
+`dblib/db_api.py` defines `DBToolSuite`, the adapter base class every
+database system implements. Built-in adapters live in `dblib/<system>.py`. An
 adapter overrides the protected hooks it supports (`_branch_impl`,
 `_commit_impl`, ..., `_storage_bytes`, `_connect_impl`, `_flush_impl`); the
 public verbs wrap them with timing, storage measurement and result recording.
-This template method is the engine's only extension point.
+The runners reach adapters through the `PreparedTarget` factory.
 
 ### Verbs
 
@@ -230,11 +259,11 @@ workload {
 
 - `schema` picks the base (CH-benCHmark or none), the scale factor W and
   row-density knobs, and the extension tables (`macrobench/schema/*.sql`;
-  by default the scenario's own). The embedding application provisions an
-  empty database; the runner creates the schema in it and seeds it with the
-  generators in `macrobench/datagen/`. The `backend` and `database_setup`
-  fields of older configs are deprecated: they still parse, and the runner
-  ignores them.
+  by default the scenario's own). For a fresh database, the runner creates
+  the schema and seeds it with the generators in `macrobench/datagen/`.
+  The CLI uses `backend` and `database_setup` to select and prepare the
+  database. `--backend` and `--db-name` override those selections for
+  provider-neutral presets. The callable runner uses its supplied target.
 - `workload.branch_ops` and `workload.data_ops` set the shared intensity
   (commit interval, retention, live-branch cap; statements per step, rows per
   write, read/write/DDL mix, worker threads, background spine clients).
@@ -258,12 +287,12 @@ workload {
 
 The embedding application provisions a database, wraps it in a
 `dblib.target.PreparedTarget` (see [Embedding the engine](#embedding-the-engine))
-and calls `main` with the runner's own options:
+and calls `run` with the runner's own options:
 
 ```python
 from macrobench import runner
 
-e2e = runner.main(["--config", "macrobench/configs/rl_env_mini.textproto", "--outdir", "run_stats",
+e2e = runner.run(["--config", "macrobench/configs/rl_env_mini.textproto", "--outdir", "run_stats",
                    "--no-progress", "--max-runtime-sec", "1800"],
                   target=target, system_name="Doltgres")
 ```
@@ -278,10 +307,11 @@ e2e = runner.main(["--config", "macrobench/configs/rl_env_mini.textproto", "--ou
 | `--measure-storage` | also measure storage around every operation |
 | `--no-progress` | no progress bar |
 
-`main` returns the e2e stats it wrote. `system_name` is recorded as
-`backend` in them. The runner never deletes the database: the embedding
-application does that after `main` returns, so the last storage point is
-`after_gc`.
+`run` returns the e2e stats it wrote. `system_name` is recorded as
+`backend` in them. The callable runner does not delete the database.
+Its caller applies cleanup after execution, so the last workflow storage
+point is `after_gc`. The standalone `python -m macrobench.runner` command
+selects a connector and applies the database cleanup policy itself.
 
 A backend that lacks a verb does not run the scenario past it: the verb is
 recorded as UNSUPPORTED, the run stops there with every worker cancelled,
@@ -343,8 +373,25 @@ against a prepared target. `task` is a `microbench.task2_pb2.TaskConfig`
 operation, `num_ops`, `warmup_ops`, an optional untimed `setup` phase
 (`num_branches` in a `SPINE`, `FAN_OUT` or `BUSHY` shape, with inserts,
 updates and deletes per branch) and the operation-specific `range_config`,
-`ddl_config` and `branch_op_config`. The deprecated `backend` and
-`database_setup` fields are ignored.
+`ddl_config` and `branch_op_config`. The standalone command uses `backend`
+and `database_setup`; the callable runner uses its supplied target.
+
+Copy the sample to `task.textproto` and add the database source. The sample
+needs a populated `customer` table. For a fresh PostgreSQL-protocol database:
+
+```textproto
+database_setup {
+  db_name: "branchbench_micro"
+  cleanup: true
+  sql_dump { sql_dump_path: "db_setup/ch_benchmark_seed.sql" }
+}
+```
+
+```bash
+uv run --frozen python -m microbench.runner2 \
+  --config task.textproto --backend dolt \
+  --db-name branchbench_micro --output-dir run_stats/micro
+```
 
 The setup phase runs untimed and leaves an `ExecutionState`: the last setup
 branch becomes every worker's starting ref, and the setup branches are
@@ -394,7 +441,7 @@ keys. A verb the backend lacks is recorded as `UNSUPPORTED`.
 
 ### Branch-verb grid
 
-`microbench.verbs.driver.main(argv, target=..., system_name=...)` measures the
+`microbench.verbs.driver.run(argv, target=..., system_name=...)` measures the
 cost of each verb against the one quantity it depends on
 (`microbench/verbs/grid.py`: one axis per verb and parameter, such as rows
 changed, commits on the branch, live branches, or the data size in
@@ -406,6 +453,15 @@ and deleted afterwards. Options: `--verbs`, `--axes`, `--reps`, `--warmup`,
 `micro_verbs_<system>_w<W>.parquet` and `micro_verbs_<system>_w<W>_stats.json`
 (per point: parameters, status, every rep's latency and storage delta, and
 their quantiles) and returns the stats.
+
+```bash
+uv run --frozen python -m microbench.verbs --backend dolt \
+  --db-name branchbench_verbs --scale 1 --verbs branch \
+  --outdir run_stats/verbs
+```
+
+The standalone verb-grid command creates a fresh database and deletes it
+after execution. Use a database name that does not already exist.
 
 ---
 
@@ -560,9 +616,11 @@ See [Result rows](#result-rows); the authoritative definition is
   `.python-version`) and the dependencies (locked in `uv.lock`). `uv sync
   --frozen` installs the project in editable mode and compiles the protos;
   `uv run` recompiles them whenever a `.proto` file changes.
-- `uv run --frozen python -m pytest tests` runs the tests against the
+- `uv run --frozen python -m pytest tests/test_runners.py` runs tests against the
   in-memory sqlite adapter in `tests/fake_backend.py`, including the three
   runners through the prepared-target seam (`tests/test_runners.py`).
+- Adapter live tests are separate from server-free tests. Read each test's
+  prerequisites before running it against a database or hosted account.
 - `uv build` produces the sdist and the wheel. The wheel carries the
   generated protobuf modules, the presets, the schemas and the dataset, so an
   application pins this repository by Git revision and never builds protos
@@ -579,4 +637,6 @@ See [Result rows](#result-rows); the authoritative definition is
 - **Scenario configurations**: See `macrobench/configs/` and `macrobench/task.proto`
 - **Microbenchmark config**: See `microbench/test_config2.textproto` and `microbench/task2.proto`
 - **Database schemas and dataset**: See `db_setup/` and `macrobench/schema/`
-- **Database adapters and system setup notes**: the BranchBench leaderboard repository, `leaderboard/systems/<system>/`
+- **Database adapters and connectors**: `dblib/<system>.py` and `dblib/connectors/<system>.py`
+- **Adding a database**: [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Leaderboard server scripts and registration**: the leaderboard repository, `leaderboard/systems/<system>/`

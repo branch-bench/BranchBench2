@@ -13,17 +13,16 @@ package macrobench;
 //                        (how much SQL each exec() step issues, how much
 //                        concurrent spine traffic there is).
 //
-// The database itself is provisioned by the embedding application, which
-// hands the runner a dblib.target.PreparedTarget. The backend and
-// database_setup fields below are deprecated: the runner ignores them and
-// they are not part of a workload's identity.
+// The CLI provisions the database using backend and database_setup.
+// Embedding applications can supply a dblib.target.PreparedTarget instead.
+// These setup fields are not part of a workload's identity.
 //
 // Each scenario ships two textprotos in macrobench/configs: <name>.textproto
 // with the paper's parameters and <name>_mini.textproto for smoke runs.
 // ============================================================================
 
-// Deprecated: the embedding application selects the database system. Kept
-// so older configs still parse; the runner never reads it.
+// Built-in integrations selectable by the CLI. New integrations also work
+// via --backend without adding an enum value.
 enum Backend {
     NEON = 0;
     DOLT = 1;
@@ -37,8 +36,7 @@ enum Backend {
 }
 
 // ---------------------------------------------------------------------------
-// Database setup (deprecated: the embedding application provisions the
-// database and the runner always generates schema and data)
+// Database setup for the CLI. Existing databases skip schema and seed data.
 // ---------------------------------------------------------------------------
 
 // Reuse an existing database (schema and data already in place).
@@ -47,7 +45,8 @@ message ExistingDatabase {
     string neon_project_id = 2;
 }
 
-// Create the database from a SQL dump (Postgres backends: loaded with psql).
+// Load a SQL dump, then apply the schema and seed generators as usual.
+// Use existing_db when schema and data are already complete.
 message SqlDump {
     string sql_dump_path = 1;
 }
@@ -300,8 +299,8 @@ message Invariants {
 // Top-level macrobenchmark configuration
 message MacroBenchConfig {
     string run_id = 1;
-    Backend backend = 2 [deprecated = true];
-    DatabaseSetup database_setup = 3 [deprecated = true];
+    optional Backend backend = 2;  // Presence prevents an implicit NEON default.
+    DatabaseSetup database_setup = 3;
     SchemaConfig schema = 4;
     Workload workload = 5;
     // Measure storage (disk_size_before/after) around each timed operation

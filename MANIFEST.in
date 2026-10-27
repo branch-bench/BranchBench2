@@ -1,5 +1,7 @@
 include build_protos.py
 include README.md
+include CONTRIBUTING.md
+recursive-include requirements *.md
 recursive-include dblib *.proto
 recursive-include microbench *.proto *.textproto
 recursive-include macrobench *.proto *.textproto *.sql

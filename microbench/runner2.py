@@ -9,8 +9,10 @@ database microbenchmarks with clear separation of concerns:
 - Timed execution phase (measure operations)
 - Result collection and reporting
 
-Usage (there is no command line; the embedding application provisions the
-database and passes it as a dblib.target.PreparedTarget):
+Standalone usage:
+    python -m microbench.runner2 --config task.textproto --output-dir results
+
+Embedding applications can supply a dblib.target.PreparedTarget:
     from microbench import runner2
     metrics = runner2.run(task_config, target, "MySystem", output_dir)
 
@@ -24,6 +26,7 @@ Design principles:
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import os
 import random
@@ -32,7 +35,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Tuple, Dict, List
 from contextlib import contextmanager
+from pathlib import Path
 
+from google.protobuf import text_format
 from tqdm import tqdm
 
 # Protobuf imports
@@ -41,6 +46,7 @@ from dblib import result_pb2 as rslt
 
 from dblib.db_api import Ref
 from dblib import result_collector as rc
+from dblib.connector import prepared_database
 from dblib.target import ExecutionState, PreparedTarget, SuiteRequest
 
 # Operation imports
@@ -2104,3 +2110,31 @@ def run(
         config, target, system_name, result_collector, metrics, output_dir
     ).write_results()
     return metrics
+
+
+def main(argv: list[str] | None = None) -> dict:
+    """Prepare the configured database, run one benchmark, and clean up."""
+    parser = argparse.ArgumentParser(description="Run database microbenchmarks from task2 config.")
+    parser.add_argument("--config", required=True, help="TaskConfig textproto")
+    parser.add_argument("--output-dir", default="/tmp/run_stats")
+    parser.add_argument("--backend", help="Database integration (overrides the config backend)")
+    parser.add_argument("--db-name", help="Database name (overrides database_setup.db_name)")
+    args = parser.parse_args(argv)
+    task = tp.TaskConfig()
+    try:
+        text_format.Parse(Path(args.config).read_text(), task)
+        register_all_operations()
+        BenchmarkConfig(task)
+    except (OSError, text_format.ParseError, ValueError) as error:
+        parser.error(str(error))
+    if not args.backend and not task.HasField("backend"):
+        parser.error("set --backend or the config backend explicitly")
+    backend = args.backend or tp.Backend.Name(task.backend)
+    if args.db_name is not None:
+        task.database_setup.db_name = args.db_name
+    with prepared_database(backend.lower(), task.database_setup) as target:
+        return run(task, target, backend.upper(), args.output_dir)
+
+
+if __name__ == "__main__":
+    main()

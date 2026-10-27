@@ -1,7 +1,7 @@
 """Macrobenchmark runner: one scenario (S1-S6) over one prepared target.
 
     from macrobench import runner
-    runner.main(["--config", "rl_env_mini.textproto", "--outdir", out],
+    runner.run(["--config", "rl_env_mini.textproto", "--outdir", out],
                 target=prepared_target, system_name="Doltgres")
 
 The embedding application provisions the database and passes it as a
@@ -10,8 +10,13 @@ with the generators, starts the optional TPC-C spine load, runs the
 scenario, and writes the operation rows to parquet plus an e2e stats JSON
 with the support summary, the invariant results, the logical work counters
 and the scenario's own metrics. Deleting the database is the embedding
-application's job, so the last storage point is taken after gc.
+application's job, so the last storage point is taken after gc. The CLI
+prepares its own database from backend and database_setup in the config.
+Existing databases skip schema and seed initialization. SQL dumps retain
+the original behavior: load the dump, then apply schema and seed data.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -26,6 +31,7 @@ from google.protobuf import text_format
 from google.protobuf.json_format import MessageToDict
 
 from dblib import result_collector as rc
+from dblib.connector import prepared_database
 from dblib.target import PreparedTarget, SuiteRequest
 from macrobench import schema as mschema
 from macrobench import task_pb2 as tp
@@ -181,11 +187,12 @@ def setup_data(config, scenario, suite, log=print) -> dict:
     return stats
 
 
-def main(argv: list, *, target: PreparedTarget, system_name: str) -> dict:
-    """Run one scenario on ``target`` and return its e2e stats."""
+def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a macrobenchmark scenario.")
     parser.add_argument("--config", required=True, help="MacroBenchConfig textproto")
     parser.add_argument("--outdir", default="/tmp/run_stats", help="parquet/json output dir")
+    parser.add_argument("--backend", help="Database integration (overrides the config backend)")
+    parser.add_argument("--db-name", help="Database name (overrides database_setup.db_name)")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--measure-storage", action="store_true",
                         help="Measure disk_size_before/after around each timed operation.")
@@ -198,19 +205,29 @@ def main(argv: list, *, target: PreparedTarget, system_name: str) -> dict:
     parser.add_argument("--storage-sample-interval", type=float, default=None,
                         help="Seconds between background storage samples during the "
                              f"scenario (default {DEFAULT_STORAGE_SAMPLE_SEC:g}; 0 = off).")
-    args = parser.parse_args(argv)
+    return parser
 
+
+def _load_args(argv: list[str] | None) -> tuple[argparse.Namespace, tp.MacroBenchConfig]:
+    parser = _argument_parser()
+    args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
-    except FileNotFoundError:
-        print(f"Error: config file not found: {args.config}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error parsing config: {e}")
-        sys.exit(1)
+    except (OSError, text_format.ParseError, ValueError) as error:
+        parser.error(str(error))
     if args.measure_storage:
         config.measure_storage = True
+    return args, config
 
+
+def run(argv: list[str], *, target: PreparedTarget, system_name: str) -> dict:
+    """Run one scenario on ``target`` and return its e2e stats."""
+    args, config = _load_args(argv)
+    return _run(args, config, target=target, system_name=system_name)
+
+
+def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
+         target: PreparedTarget, system_name: str) -> dict:
     scenario_key = config.workload.WhichOneof("scenario")
     print(f"Run ID: {config.run_id}")
     print(f"System: {system_name}")
@@ -270,7 +287,13 @@ def main(argv: list, *, target: PreparedTarget, system_name: str) -> dict:
                           initial_db_size=0, seed=ctx.seed)
 
     setup_suite = ctx.new_suite()
-    seed_stats = setup_data(config, scenario, setup_suite)
+    seed_stats = {}
+    if config.database_setup.WhichOneof("source") != "existing_db":
+        try:
+            seed_stats = setup_data(config, scenario, setup_suite)
+        except BaseException:
+            ctx.close_suite(setup_suite)
+            raise
 
     # Workflow-level storage points (always on; a directory walk each):
     # after setup, after the scenario (its branches deleted) and after the
@@ -346,6 +369,9 @@ def main(argv: list, *, target: PreparedTarget, system_name: str) -> dict:
     except Exception as e:
         status = f"crashed: {type(e).__name__}: {e}"
         traceback.print_exc()
+    except BaseException as e:
+        status = f"aborted: {type(e).__name__}: {e}"
+        raise
     finally:
         for s, h in previous_handlers.items():
             signal.signal(s, h)
@@ -459,4 +485,20 @@ def main(argv: list, *, target: PreparedTarget, system_name: str) -> dict:
                 print(f"  {st['op']} on {st['ref'] or '?'} ({st['label']}) after {st['elapsed_sec']}s: {st['outcome']}")
 
         collector.write_to_parquet(append=False)
-        return e2e
+    return e2e
+
+
+def main(argv: list[str] | None = None) -> dict:
+    """Prepare the configured database, run the scenario, and clean up."""
+    args, config = _load_args(argv)
+    if not args.backend and not config.HasField("backend"):
+        _argument_parser().error("set --backend or the config backend explicitly")
+    backend = args.backend or tp.Backend.Name(config.backend)
+    if args.db_name is not None:
+        config.database_setup.db_name = args.db_name
+    with prepared_database(backend.lower(), config.database_setup) as target:
+        return _run(args, config, target=target, system_name=backend.upper())
+
+
+if __name__ == "__main__":
+    main()

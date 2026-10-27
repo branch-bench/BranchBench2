@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "db-fork"
 version = "0.2.0"
-description = "BranchBench benchmark engine: the git-like database API, the microbenchmark runners and the S1-S6 agent-workflow scenarios, with no concrete database system."
+description = "BranchBench benchmark engine, standalone CLIs, and database integrations."
 authors = [{ name = "Elaine", email = "ra3448@columbia.edu" }]
 requires-python = ">=3.11"
 dependencies = [
@@ -17,11 +17,19 @@ dependencies = [
     "pymysql",  # util.db_helpers recognises MySQL-protocol connections
     "pyarrow>=22,<23",  # Writes result parquet files
     "tqdm",
+    "aiomysql",  # Async exec on MySQL-protocol adapters
+    "psycopg[binary]>=3.0",  # Chronos adapter
+    "psycopg-pool",  # Async exec on Postgres-protocol adapters
+    "requests",  # Hosted Neon and Xata adapters
+    "sqlglot>=30.22.0",  # Chronos SQL handling
 ]
 
 [project.optional-dependencies]
 # scripts/plotting: analysis of finished runs, never needed to run a benchmark.
 plotting = ["matplotlib", "numpy", "pandas>=2.3,<3", "scipy"]
+chronos = [
+    "chronos-core @ git+https://github.com/mitdbg/chronos@607418d4d06ba1a67be0e9e5a7617132f265a87c#subdirectory=packages/chronos-core",
+]
 
 [dependency-groups]
 dev = ["pytest"]
