@@ -162,7 +162,8 @@ def test_macrobench_main_closes_every_worker_suite_exactly_once(tmp_path):
     opened is closed exactly once by the time main returns, after a complete run and
     after a suite could not even be opened for one worker."""
     class Connection(FakeSuite):
-        """One shared in-memory database; each instance is its own connection to it."""
+        """One shared in-memory database; each instance is its own connection to it and
+        records the thread that opened it and every thread that closed it."""
         shared, live, peak, lock = None, 0, 0, threading.Lock()
 
         def __init__(self, result_collector=None, measure_storage=False):
@@ -171,43 +172,50 @@ def test_macrobench_main_closes_every_worker_suite_exactly_once(tmp_path):
                 Connection.shared = (self.branches, self.commits, self.history)
             self.branches, self.commits, self.history = Connection.shared
             self._connect_impl(Ref("main"))
-            self.closes = 0
+            self.opened_on, self.closed_on = threading.get_ident(), []
             with Connection.lock:
                 Connection.live += 1
                 Connection.peak = max(Connection.peak, Connection.live)
 
         def close_connection(self):
             super().close_connection()
-            self.closes += 1
+            self.closed_on.append(threading.get_ident())
             with Connection.lock:
                 Connection.live -= 1
 
-    def run(name, fail_at=None):
+    def run(name, fail_second_worker=False):
+        """rl_env on two concurrent workers. With fail_second_worker the two worker suites
+        are requested together (worker_index 1 and 2 meet at a barrier), the first opens
+        and the second request raises, so one worker suite is open when another worker's
+        factory fails."""
         Connection.shared, Connection.live, Connection.peak = None, 0, 0
-        opened = []
+        opened, both_requested = [], threading.Barrier(2, timeout=10)
 
         def open_suite(request: SuiteRequest):
-            if fail_at == len(opened) + 1:
-                raise RuntimeError("simulated connection failure")
-            opened.append(Connection(request.result_collector))
-            return opened[-1]
+            if fail_second_worker and request.worker_index in (1, 2):
+                both_requested.wait()
+                if request.worker_index == 2:
+                    raise RuntimeError("simulated connection failure")
+            suite = Connection(request.result_collector)
+            opened.append(suite)
+            return suite
 
         config = tmp_path / f"{name}.textproto"
         config.write_text(f'run_id: "{name}" seed: 7 ' + CONFIGS["rl_env"].replace("data_ops {", "data_ops { worker_threads: 2", 1))
         e2e = macro_runner.main(["--config", str(config), "--outdir", str(tmp_path), "--no-progress"],
                                 target=PreparedTarget("main", Connection, open_suite), system_name="fake")
-        assert [s.closes for s in opened] == [1] * len(opened), "every opened suite was closed exactly once"
+        assert [s.closed_on for s in opened] == [[s.opened_on] for s in opened], "each suite closed exactly once, on the thread that opened it"
         assert all(s.conn is None for s in opened) and Connection.live == 0, "no connection remains"
         return e2e, opened
 
     e2e, opened = run("bb_pool")
     assert e2e["status"] == "completed" and e2e["worker_errors"] == []
     assert e2e["work"] == {"expected": 6, "succeeded": 6, "failed": 0, "skipped": 0}
-    assert len(opened) >= 4 and Connection.peak >= 3, "the setup suite and concurrent worker suites were open together"
+    assert len({s.opened_on for s in opened}) >= 3 and Connection.peak >= 3, "the setup suite and two worker suites were open together on their own threads"
 
-    e2e, opened = run("bb_pool_fail", fail_at=2)  # the first worker suite after the setup suite
+    e2e, opened = run("bb_pool_fail", fail_second_worker=True)
     assert e2e["status"].startswith("crashed: RuntimeError: simulated connection failure")
-    assert len(opened) >= 1 and Connection.live == 0
+    assert len(opened) >= 2, "the setup suite and the first worker suite were open when the second worker's factory failed"
 
 
 def test_macrobench_main_counts_each_data_agent_step_once_after_a_reset(tmp_path):
