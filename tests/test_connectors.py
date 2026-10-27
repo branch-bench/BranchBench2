@@ -28,7 +28,8 @@ def server_mock() -> mock.Mock:
 
 def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
     names = connector_names()
-    assert names == ["chronos", "dolt", "dolt_mysql", "file_copy", "matrixone", "neon", "seekdb", "xata"]
+    assert names == ["bauplan", "chronos", "dolt", "dolt_mysql", "file_copy", "matrixone",
+                     "neon", "seekdb", "terminusdb", "xata"]
     with mock.patch("dblib.connector.importlib.import_module") as imported:
         assert connector_names() == names
         imported.assert_not_called()
@@ -54,15 +55,36 @@ def test_invalid_database_name_fails_before_loading_a_provider(name) -> None:
         load.assert_not_called()
 
 
-def test_existing_collision_is_never_deleted() -> None:
+@pytest.mark.parametrize("source", [pytest.param(None, id="generated"), "sql_dump"])
+def test_generated_setup_replaces_existing_resources_before_provision(source, tmp_path) -> None:
     server = server_mock()
     server.exists.return_value = True
+    setup = setup_config(source=source, cleanup=False)
+    if source == "sql_dump":
+        dump = tmp_path / "data.sql"
+        dump.write_text("SELECT 1;")
+        setup.sql_dump.sql_dump_path = str(dump)
     with mock.patch("dblib.connector.load_connector", return_value=server):
-        with pytest.raises(ValueError, match="refusing to overwrite"):
+        with prepared_database("dolt", setup) as target:
+            assert target is server.prepare_target.return_value
+    assert server.method_calls[:4] == [
+        mock.call.preflight(),
+        mock.call.exists("bb_test"),
+        mock.call.delete("bb_test"),
+        mock.call.provision("bb_test"),
+    ]
+    server.delete_database.assert_not_called()
+
+
+def test_stale_resource_delete_failure_stops_provision() -> None:
+    server = server_mock()
+    server.exists.return_value = True
+    server.delete.side_effect = RuntimeError("delete failed")
+    with mock.patch("dblib.connector.load_connector", return_value=server):
+        with pytest.raises(RuntimeError, match="delete failed"):
             with prepared_database("dolt", setup_config()):
-                pytest.fail("existing target reached execution")
+                pytest.fail("failed deletion reached execution")
     server.provision.assert_not_called()
-    server.delete.assert_not_called()
     server.delete_database.assert_not_called()
 
 
@@ -284,6 +306,22 @@ def test_neon_attach_and_cleanup_use_supplied_project_identity(branch_id, expect
         server.delete_database(database)
     request.assert_called_once_with("DELETE", "projects/actual-project")
     discover.assert_not_called()
+
+
+def test_neon_consumption_metrics_waits_for_nonempty_metrics() -> None:
+    from dblib.connectors import neon
+
+    server = load_connector("neon")
+    database = DatabaseHandle(
+        "bb_test", "main", neon.NeonState("actual-project", "br-default"))
+    metrics = {"count": 1, "all_metrics": [{"metric": "compute_seconds"}]}
+    with mock.patch.object(neon.time, "sleep") as sleep, \
+            mock.patch.object(neon.NeonToolSuite, "get_consumption_metrics",
+                              side_effect=[None, {"all_metrics": []}, metrics]) as fetch:
+        assert server.consumption_metrics(database) is metrics
+
+    assert sleep.call_args_list == [mock.call(60)] * 17
+    assert fetch.call_args_list == [mock.call("actual-project")] * 3
 
 
 def test_file_copy_recovery_state_survives_fresh_connector_instance(tmp_path) -> None:

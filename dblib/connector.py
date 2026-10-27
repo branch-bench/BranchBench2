@@ -75,6 +75,10 @@ class Connector(ABC):
     def preflight(self) -> None:
         """Check hosted account access before creating resources."""
 
+    def consumption_metrics(self, database: DatabaseHandle) -> dict | None:
+        """Return provider consumption metrics when available."""
+        return None
+
 
 def connector_names() -> list[str]:
     """List built-in providers without importing their optional dependencies."""
@@ -88,11 +92,10 @@ def load_connector(name: str, *, state_dir: Path | None = None) -> Connector:
     return importlib.import_module(f"dblib.connectors.{name}").CONNECTOR(state_dir=state_dir)
 
 
-@contextmanager
-def prepared_database(
+def prepare_database(
     backend: str, setup: object, *, state_dir: Path | None = None,
-) -> Iterator[PreparedTarget]:
-    """Apply setup.cleanup only to successfully returned database handles.
+) -> tuple[Connector, DatabaseHandle, PreparedTarget]:
+    """Prepare a database and return its lifecycle owner, handle, and target.
 
     Providers remove resources they acquired when provisioning fails, even when
     setup.cleanup is false. A failed CREATE never proves database ownership.
@@ -111,13 +114,27 @@ def prepared_database(
         database = connector.attach(db, setup.existing_db)
     else:
         if connector.exists(db):
-            raise ValueError(f"refusing to overwrite existing database resources for {db!r}; "
-                             "use existing_db or choose another db_name")
+            connector.delete(db)
         database = connector.provision(db)
     try:
         if dump is not None:
             connector.load(database, dump)
-        yield connector.prepare_target(database)
+        target = connector.prepare_target(database)
+    except BaseException:
+        if setup.cleanup:
+            connector.delete_database(database)
+        raise
+    return connector, database, target
+
+
+@contextmanager
+def prepared_database(
+    backend: str, setup: object, *, state_dir: Path | None = None,
+) -> Iterator[PreparedTarget]:
+    """Yield a prepared target and apply setup.cleanup when it exits."""
+    connector, database, target = prepare_database(backend, setup, state_dir=state_dir)
+    try:
+        yield target
     finally:
         if setup.cleanup:
             connector.delete_database(database)

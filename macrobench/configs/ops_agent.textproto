@@ -1,5 +1,7 @@
 # S5 Operations agent: dense commits, bad deploy, investigation, PITR.
 run_id: "macro_ops_agent_dolt"
+backend: DOLT
+database_setup { db_name: "macro_ops_agent" cleanup: true generated {} }
 schema { base: CH_BENCH scale_factor: 1 }
 workload {
   branch_ops { commit_interval: 1 }

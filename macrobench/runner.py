@@ -19,6 +19,7 @@ the original behavior: load the dump, then apply schema and seed data.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import json
 import os
 import signal
@@ -31,7 +32,7 @@ from google.protobuf import text_format
 from google.protobuf.json_format import MessageToDict
 
 from dblib import result_collector as rc
-from dblib.connector import prepared_database
+from dblib.connector import prepare_database
 from dblib.target import PreparedTarget, SuiteRequest
 from macrobench import schema as mschema
 from macrobench import task_pb2 as tp
@@ -227,7 +228,8 @@ def run(argv: list[str], *, target: PreparedTarget, system_name: str) -> dict:
 
 
 def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
-         target: PreparedTarget, system_name: str) -> dict:
+         target: PreparedTarget, system_name: str,
+         _finalize_result: Callable[[dict, object], None] | None = None) -> dict:
     scenario_key = config.workload.WhichOneof("scenario")
     print(f"Run ID: {config.run_id}")
     print(f"System: {system_name}")
@@ -465,6 +467,8 @@ def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
             "run_start_time": round(start_time, 3),
             "samples": sampler.samples if sampler is not None else [],
         }
+        if _finalize_result is not None:
+            _finalize_result(e2e, setup_suite)
         os.makedirs(args.outdir, exist_ok=True)
         path = os.path.join(args.outdir, f"{config.run_id}_e2e_stats.json")
         with open(path, "w") as f:
@@ -491,13 +495,48 @@ def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
 def main(argv: list[str] | None = None) -> dict:
     """Prepare the configured database, run the scenario, and clean up."""
     args, config = _load_args(argv)
-    if not args.backend and not config.HasField("backend"):
-        _argument_parser().error("set --backend or the config backend explicitly")
     backend = args.backend or tp.Backend.Name(config.backend)
     if args.db_name is not None:
         config.database_setup.db_name = args.db_name
-    with prepared_database(backend.lower(), config.database_setup) as target:
-        return _run(args, config, target=target, system_name=backend.upper())
+    connector, database, target = prepare_database(
+        backend.lower(), config.database_setup)
+    cleanup_attempted = False
+
+    def cleanup() -> None:
+        nonlocal cleanup_attempted
+        if cleanup_attempted or not config.database_setup.cleanup:
+            return
+        cleanup_attempted = True
+        for attempt in range(2):
+            try:
+                connector.delete_database(database)
+                break
+            except Exception as error:
+                if attempt == 0:
+                    print(f"Cleanup failed ({type(error).__name__}), retrying...")
+                    time.sleep(2)
+                else:
+                    print(f"Cleanup failed after retry: {error}")
+
+    def finalize_result(e2e: dict, setup_suite: object) -> None:
+        metrics = (connector.consumption_metrics(database)
+                   if config.measure_storage else None)
+        if metrics:
+            e2e["neon_metrics_count"] = metrics.get("count", 0)
+            e2e["neon_all_metrics"] = metrics.get("all_metrics", [])
+            for key, value in (metrics.get("summary") or {}).items():
+                e2e[f"neon_{key}"] = value
+        cleanup()
+        os.sync()
+        after_cleanup = setup_suite._safe_storage()
+        e2e["storage"]["points"]["after_cleanup"] = after_cleanup
+        print(f"Storage after cleanup: {after_cleanup} bytes")
+
+    try:
+        return _run(args, config, target=target, system_name=backend.upper(),
+                    _finalize_result=finalize_result)
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":

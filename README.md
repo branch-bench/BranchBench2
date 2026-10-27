@@ -376,21 +376,12 @@ updates and deletes per branch) and the operation-specific `range_config`,
 `ddl_config` and `branch_op_config`. The standalone command uses `backend`
 and `database_setup`; the callable runner uses its supplied target.
 
-Copy the sample to `task.textproto` and add the database source. The sample
-needs a populated `customer` table. For a fresh PostgreSQL-protocol database:
-
-```textproto
-database_setup {
-  db_name: "branchbench_micro"
-  cleanup: true
-  sql_dump { sql_dump_path: "db_setup/ch_benchmark_seed.sql" }
-}
-```
+The sample selects Dolt and loads the bundled CH-benCHmark seed into a fresh
+database. Its `customer` table supplies the benchmark data.
 
 ```bash
 uv run --frozen python -m microbench.runner2 \
-  --config task.textproto --backend dolt \
-  --db-name branchbench_micro --output-dir run_stats/micro
+  --config microbench/test_config2.textproto --output-dir run_stats/micro
 ```
 
 The setup phase runs untimed and leaves an `ExecutionState`: the last setup

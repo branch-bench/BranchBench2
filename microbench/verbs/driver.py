@@ -339,8 +339,28 @@ def main(argv: list[str] | None = None) -> dict | None:
         return None
     setup = tp.DatabaseSetup(db_name=args.db_name, cleanup=True)
     setup.generated.SetInParent()
-    with prepared_database(args.backend.lower(), setup) as target:
-        return _run(args, points, done, target=target, system_name=args.backend.upper())
+    completed = False
+    run_failure = None
+    try:
+        with prepared_database(args.backend.lower(), setup) as target:
+            try:
+                result = _run(args, points, done, target=target, system_name=args.backend.upper())
+            except BaseException as error:
+                run_failure = (error, error.__traceback__)
+                raise
+            completed = True
+    except BaseException as error:
+        if run_failure is not None:
+            failure, traceback = run_failure
+            if error is not failure:
+                if not isinstance(error, Exception):
+                    raise
+                print(f"Cleanup failed: {error}")
+            raise failure.with_traceback(traceback)
+        if not completed or not isinstance(error, Exception):
+            raise
+        print(f"Cleanup failed: {error}")
+    return result
 
 
 if __name__ == "__main__":

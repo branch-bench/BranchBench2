@@ -2127,11 +2127,19 @@ def main(argv: list[str] | None = None) -> dict:
         BenchmarkConfig(task)
     except (OSError, text_format.ParseError, ValueError) as error:
         parser.error(str(error))
-    if not args.backend and not task.HasField("backend"):
-        parser.error("set --backend or the config backend explicitly")
     backend = args.backend or tp.Backend.Name(task.backend)
     if args.db_name is not None:
         task.database_setup.db_name = args.db_name
+    if task.database_setup.WhichOneof("source") == "sql_dump":
+        dump = Path(task.database_setup.sql_dump.sql_dump_path).expanduser()
+        if not dump.is_absolute() and not dump.is_file():
+            roots = (Path(args.config).resolve().parent,
+                     Path(__file__).resolve().parent.parent)
+            for root in roots:
+                candidate = root / dump
+                if candidate.is_file():
+                    task.database_setup.sql_dump.sql_dump_path = str(candidate)
+                    break
     with prepared_database(backend.lower(), task.database_setup) as target:
         return run(task, target, backend.upper(), args.output_dir)
 

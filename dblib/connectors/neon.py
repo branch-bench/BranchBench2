@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+import time
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
@@ -103,6 +104,23 @@ class Neon(Connector):
             )
 
         return PreparedTarget(database.root_ref, NeonToolSuite, open_suite)
+
+    def consumption_metrics(self, database: DatabaseHandle) -> dict | None:
+        """Wait for Neon's delayed project consumption metrics."""
+        self._sync_env()
+        print("Waiting 15 min for Neon consumption metrics (after)...", flush=True)
+        for elapsed_min in range(15):
+            time.sleep(60)
+            if (elapsed_min + 1) % 3 == 0 or elapsed_min == 14:
+                print(f"  {elapsed_min + 1}/15 min elapsed...", flush=True)
+        for attempt in range(10):
+            result = NeonToolSuite.get_consumption_metrics(database.state.project_id)
+            if result and result.get("all_metrics"):
+                return result
+            if attempt < 9:
+                time.sleep(60)
+        print("  WARNING: No Neon consumption metrics for after", flush=True)
+        return None
 
     def delete(self, db: str) -> None:
         self._sync_env()

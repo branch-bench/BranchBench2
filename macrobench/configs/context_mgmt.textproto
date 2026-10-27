@@ -2,6 +2,8 @@
 # One exec() per exchange (a user turn, an assistant turn, a tool call) plus a
 # context read; 100 exchanges per compaction cycle (2026-10-16, was 25 steps of 4).
 run_id: "macro_context_mgmt_dolt"
+backend: DOLT
+database_setup { db_name: "macro_context_mgmt" cleanup: true generated {} }
 schema { base: NO_BASE }
 workload {
   branch_ops { commit_interval: 2 retention_steps: 80 }

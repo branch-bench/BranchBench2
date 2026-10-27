@@ -1,5 +1,7 @@
 # S5 Operations agent, smoke size.
 run_id: "macro_ops_agent_mini_dolt"
+backend: DOLT
+database_setup { db_name: "macro_ops_agent_mini" cleanup: true generated {} }
 schema { base: CH_BENCH scale_factor: 1 items: 1000 customers_per_district: 100 orders_per_district: 100 suppliers: 100 }
 workload {
   branch_ops { commit_interval: 1 }

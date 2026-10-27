@@ -1,5 +1,7 @@
 # S6 Data agent: ingestion batches rebased and merged into a warehouse.
 run_id: "macro_data_agent_dolt"
+backend: DOLT
+database_setup { db_name: "macro_data_agent" cleanup: true generated {} }
 schema { base: CH_BENCH scale_factor: 1 }
 workload {
   branch_ops { commit_interval: 2 }

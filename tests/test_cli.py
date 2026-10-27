@@ -1,6 +1,7 @@
 """Standalone commands prepare engine integrations without leaderboard imports."""
 
 import json
+from pathlib import Path
 import subprocess
 import sys
 from unittest import mock
@@ -39,18 +40,142 @@ def test_backend_presence_distinguishes_explicit_neon(message):
     assert config.HasField("backend") and config.backend == 0
 
 
-@pytest.mark.parametrize("runner, text", [
-    (runner2, 'run_id: "cli" operation_benchmark { num_ops: 1 }'),
-    (macro_runner, 'run_id: "cli" ' + CONFIGS["rl_env"]),
-])
-def test_cli_rejects_implicit_provider_before_loading_an_integration(tmp_path, runner, text):
+@pytest.mark.parametrize(
+    "config_path",
+    sorted((Path(macro_runner.__file__).parent / "configs").glob("*.textproto")),
+    ids=lambda path: path.stem,
+)
+def test_bundled_macro_configs_select_a_cli_database(config_path):
+    config = macro_runner.load_config(str(config_path))
+
+    assert config.HasField("backend") and config.backend == mtp.Backend.DOLT
+    assert config.database_setup.db_name
+    assert config.database_setup.cleanup is True
+    assert config.database_setup.WhichOneof("source") == "generated"
+
+
+def test_bundled_macro_config_runs_with_its_provider_and_setup():
+    provider, database = fake_connector(FakeSuite(rc.ResultCollector()))
+    config = Path(macro_runner.__file__).parent / "configs" / "rl_env_mini.textproto"
+    with mock.patch.object(connector, "load_connector", return_value=provider) as load, \
+            mock.patch.object(macro_runner, "_run", return_value={}) as execute:
+        macro_runner.main(["--config", str(config)])
+
+    load.assert_called_once_with("dolt", state_dir=None)
+    provider.provision.assert_called_once_with("macro_rl_env_mini")
+    provider.delete_database.assert_called_once_with(database)
+    assert execute.call_args.kwargs["system_name"] == "DOLT"
+
+
+def test_macro_run_uses_supplied_target_instead_of_bundled_setup():
+    target = mock.sentinel.target
+    config = Path(macro_runner.__file__).parent / "configs" / "rl_env_mini.textproto"
+    with mock.patch.object(macro_runner, "prepare_database") as prepare, \
+            mock.patch.object(macro_runner, "_run", return_value={}) as execute:
+        macro_runner.run(["--config", str(config)], target=target, system_name="leaderboard")
+
+    prepare.assert_not_called()
+    assert execute.call_args.kwargs == {
+        "target": target,
+        "system_name": "leaderboard",
+    }
+
+
+def test_bundled_micro_config_selects_a_cli_database(tmp_path, monkeypatch):
+    config_path = Path(runner2.__file__).parent / "test_config2.textproto"
+    target = mock.sentinel.target
+    prepared = mock.MagicMock()
+    prepared.return_value.__enter__.return_value = target
+    monkeypatch.chdir(tmp_path)
+    with mock.patch.object(runner2, "prepared_database", prepared), \
+            mock.patch.object(runner2, "run", return_value={}) as execute:
+        runner2.main(["--config", str(config_path)])
+
+    backend, setup = prepared.call_args.args
+    assert backend == "dolt"
+    assert setup.db_name == "tpcc_test" and setup.cleanup is True
+    assert setup.WhichOneof("source") == "sql_dump"
+    assert Path(setup.sql_dump.sql_dump_path).is_file()
+    execute.assert_called_once_with(mock.ANY, target, "DOLT", "/tmp/run_stats")
+
+
+def test_micro_cli_defaults_to_neon_and_resolves_config_relative_dump(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    dump = config_dir / "data.sql"
+    dump.write_text("SELECT 1;")
+    config = config_dir / "task.textproto"
+    config.write_text('run_id: "cli" database_setup { db_name: "cli_db" '
+                      'sql_dump { sql_dump_path: "data.sql" } } '
+                      'operation_benchmark { num_ops: 1 }')
+    target = mock.sentinel.target
+    prepared = mock.MagicMock()
+    prepared.return_value.__enter__.return_value = target
+    monkeypatch.chdir(tmp_path)
+    with mock.patch.object(runner2, "prepared_database", prepared), \
+            mock.patch.object(runner2, "run", return_value={}) as execute:
+        runner2.main(["--config", str(config)])
+
+    backend, setup = prepared.call_args.args
+    assert backend == "neon"
+    assert Path(setup.sql_dump.sql_dump_path) == dump
+    execute.assert_called_once_with(mock.ANY, target, "NEON", "/tmp/run_stats")
+
+
+def test_macro_cli_defaults_to_neon_and_finalizes_before_writing(tmp_path):
+    suite = FakeSuite(rc.ResultCollector())
+    provider, database = fake_connector(suite)
+    events = []
+
+    def delete(handle):
+        assert handle is database
+        events.append("delete")
+        raise RuntimeError("retry cleanup")
+
+    def metrics(handle):
+        assert handle is database
+        events.append("metrics")
+        return {
+            "count": 1,
+            "all_metrics": [{"metric": "compute_seconds", "value": 3}],
+            "summary": {"compute_seconds": 3},
+        }
+
+    original_storage = suite._safe_storage
+
+    def storage():
+        events.append("storage")
+        return original_storage()
+
+    provider.delete_database.side_effect = delete
+    provider.consumption_metrics.side_effect = metrics
     config = tmp_path / "config.textproto"
-    config.write_text(text)
-    with mock.patch.object(connector, "load_connector") as load:
-        with pytest.raises(SystemExit) as caught:
-            runner.main(["--config", str(config)])
-    assert caught.value.code == 2
-    load.assert_not_called()
+    config.write_text('run_id: "cli" measure_storage: true '
+                      'database_setup { db_name: "cli_db" cleanup: true } '
+                      + CONFIGS["rl_env"])
+    with mock.patch.object(connector, "load_connector", return_value=provider) as load, \
+            mock.patch.object(suite, "_safe_storage", side_effect=storage), \
+            mock.patch.object(macro_runner.time, "sleep",
+                              side_effect=lambda _: events.append("sleep")) as sleep, \
+            mock.patch.object(macro_runner.os, "sync", side_effect=lambda: events.append("sync")):
+        result = macro_runner.main([
+            "--config", str(config), "--outdir", str(tmp_path), "--no-progress",
+            "--storage-sample-interval", "0",
+        ])
+
+    load.assert_called_once_with("neon", state_dir=None)
+    assert events[events.index("metrics"):] == [
+        "metrics", "delete", "sleep", "delete", "sync", "storage",
+    ]
+    sleep.assert_called_once_with(2)
+    assert result["neon_metrics_count"] == 1
+    assert result["neon_all_metrics"] == [{"metric": "compute_seconds", "value": 3}]
+    assert result["neon_compute_seconds"] == 3
+    assert "after_cleanup" in result["storage"]["points"]
+    written = json.loads((tmp_path / "cli_e2e_stats.json").read_text())
+    assert (written["storage"]["points"]["after_cleanup"]
+            == result["storage"]["points"]["after_cleanup"])
+    assert written["neon_compute_seconds"] == 3
 
 
 def fake_connector(suite):
@@ -149,6 +274,34 @@ def test_verbs_cli_skips_finished_grid_without_provisioning(tmp_path):
 
     assert result is None
     load.assert_not_called()
+
+
+def test_verbs_cli_logs_cleanup_failure_after_completed_run(tmp_path, capsys):
+    provider, _ = fake_connector(FakeSuite(rc.ResultCollector()))
+    provider.delete_database.side_effect = RuntimeError("delete failed")
+    stats = {"status": "completed"}
+    with mock.patch.object(connector, "load_connector", return_value=provider), \
+            mock.patch.object(driver, "_run", return_value=stats):
+        result = driver.main(["--backend", "dolt", "--db-name", "cli_db",
+                              "--outdir", str(tmp_path), "--verbs", "branch",
+                              "--axes", "scale"])
+
+    assert result is stats
+    assert "Cleanup failed: delete failed" in capsys.readouterr().out
+
+
+def test_verbs_cli_cleanup_failure_does_not_mask_run_failure(tmp_path, capsys):
+    provider, _ = fake_connector(FakeSuite(rc.ResultCollector()))
+    provider.delete_database.side_effect = RuntimeError("delete failed")
+    with mock.patch.object(connector, "load_connector", return_value=provider), \
+            mock.patch.object(driver, "_run", side_effect=SystemExit(73)):
+        with pytest.raises(SystemExit) as caught:
+            driver.main(["--backend", "dolt", "--db-name", "cli_db",
+                         "--outdir", str(tmp_path), "--verbs", "branch",
+                         "--axes", "scale"])
+
+    assert caught.value.code == 73
+    assert "Cleanup failed: delete failed" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("stage", ["seed_ch", "fork", "run_point"])

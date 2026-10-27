@@ -1,5 +1,7 @@
 # S4 Development agent: busy production spine, long-lived dev branches.
 run_id: "macro_dev_agent_dolt"
+backend: DOLT
+database_setup { db_name: "macro_dev_agent" cleanup: true generated {} }
 schema { base: CH_BENCH scale_factor: 1 }
 workload {
   branch_ops { commit_interval: 2 retention_steps: 5 }
