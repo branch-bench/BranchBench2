@@ -146,8 +146,7 @@ class RlEnvScenario(Scenario):
                 if not isinstance(r, dict):
                     if isinstance(r, ScenarioStopped):
                         raise r
-                    ctx.tick()      # the pool already noted the exception
-                    continue
+                    continue        # the pool accounted the crashed rollout
                 steps_total += r["steps"]
                 recorded.extend(r["recorded"])
                 with ctx._lock:
@@ -156,7 +155,7 @@ class RlEnvScenario(Scenario):
                     self._ddl[r["branch"]] = r["ddl"]
                 if r["leaf"]:
                     leaves.append(r["leaf"])
-                ctx.tick()
+                ctx.tick(outcome="succeeded" if r["leaf"] else "failed")
 
         # 3. Score the group: cross-branch consistency read + diff per leaf.
         leaf_refs = [b for b, _ in leaves]

@@ -151,7 +151,7 @@ class DataAgentScenario(Scenario):
         res = ctx.branch(suite, branch, ctx.spine, label="batch_branch")
         if not res.ok:
             ctx.note(f"batch {b}: branch {res.status_name} {res.error}")
-            ctx.tick(p.steps_per_batch)
+            ctx.tick(p.steps_per_batch, outcome="failed")
             return None
         branches = [branch]
         w.exec([("INSERT INTO batch_manifest (batch_id, branch_name, days_back, rows_loaded, status, created_at) "
@@ -227,6 +227,11 @@ class DataAgentScenario(Scenario):
                     committed = [c for c in committed if c[0] <= back_step]
                     loaded_by_step = {st: n for st, n in loaded_by_step.items() if st <= back_step}
                     step = back_step + 1
+                    # The steps up to that commit are done, this one
+                    # included when it went back to its own commit.
+                    if step > ticked:
+                        ctx.tick(step - ticked)
+                        ticked = step
                     continue
             step += 1
             if step > ticked:  # steps replayed after a reset are not new units

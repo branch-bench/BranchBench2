@@ -158,7 +158,6 @@ class ScenarioContext:
     work: WorkSummary = field(default_factory=WorkSummary)
     _slots: Optional[threading.BoundedSemaphore] = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
-    _work_local: threading.local = field(default_factory=threading.local)
 
     def __post_init__(self):
         self.seed = self.config.seed or 42
@@ -221,20 +220,15 @@ class ScenarioContext:
                 raise UnsupportedOperationAbort(self.unsupported_abort)
             raise ScenarioStopped()
 
-    def tick(self, n: int = 1) -> None:
-        outcome = getattr(self._work_local, "pending_outcome", "succeeded")
-        self._work_local.pending_outcome = "succeeded"
-        self._work_local.worker_ticks = getattr(self._work_local, "worker_ticks", 0) + n
+    def tick(self, n: int = 1, outcome: str = "succeeded") -> None:
+        """Account ``n`` units of logical work as ``outcome`` (succeeded,
+        failed or skipped) and advance the progress bar."""
         self.work.record(outcome, n)
         if self.progress is not None:
             self.progress.update(n)
 
     def note(self, msg: str) -> None:
         text = str(msg or "")
-        if "not run:" in text or ("UNSUPPORTED" in text and ("branch" in text or "candidate" in text)):
-            self._work_local.pending_outcome = "skipped"
-        elif "FAILED" in text and ("branch" in text or "candidate" in text):
-            self._work_local.pending_outcome = "failed"
         if self.progress is not None:
             self.progress.write(text)
         else:
@@ -282,7 +276,9 @@ class ScenarioContext:
                     thread_base: int = 1) -> list:
         """Run ``fn(worker, item)`` over ``items`` on a pool of threads, each
         with its own suite (``worker.suite``), rng (``worker.rng``) and id.
-        Returns the list of return values (or exceptions) in item order."""
+        Returns the list of return values (or exceptions) in item order.
+        A worker that raises is one failed unit of work with a worker
+        error; every other unit is accounted by the scenario's tick()."""
         threads = threads or self.worker_threads
         threads = max(1, min(threads, len(items) or 1))
         results = [None] * len(items)
@@ -301,17 +297,8 @@ class ScenarioContext:
 
         def task(i, item):
             w = init_worker()
-            ticks_before = getattr(self._work_local, "worker_ticks", 0)
             try:
                 results[i] = fn(w, item)
-                result = results[i]
-                if isinstance(result, dict) and "batch" in result and "rows" in result:
-                    steps = int(getattr(getattr(self.config.workload, "data_agent", None), "steps_per_batch", 0) or 0)
-                    ticks_done = getattr(self._work_local, "worker_ticks", 0) - ticks_before
-                    if steps > ticks_done:
-                        missing = steps - ticks_done
-                        self._work_local.worker_ticks = getattr(self._work_local, "worker_ticks", 0) + missing
-                        self.work.record("succeeded", missing)
             except ScenarioStopped as e:
                 results[i] = e
             except Exception as e:

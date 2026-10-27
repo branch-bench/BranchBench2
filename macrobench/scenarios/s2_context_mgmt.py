@@ -125,8 +125,11 @@ class ContextMgmtScenario(Scenario):
                                           threads=max(1, min(p.fanout, ctx.worker_threads)),
                                           thread_base=100 * cycle)
                 cands = [r for r in results if isinstance(r, dict)]
+                # Accounted here, on the caller's thread: the compaction
+                # unit failed when any candidate did not come back.
+                outcome = "succeeded" if len(cands) == len(items) else "failed"
                 if not cands:
-                    ctx.tick()
+                    ctx.tick(outcome=outcome)
                     continue
 
                 pick = self._policy_check(suite, cands)
@@ -145,7 +148,7 @@ class ContextMgmtScenario(Scenario):
                 for c in cands:
                     if c is not alternatives.get(cycle):
                         pending_delete.append((c["branch"], step + retention))
-                ctx.tick()
+                ctx.tick(outcome=outcome)
 
                 # End of a block: reject the block's chosen compaction.
                 if cycle % cpr == 0 or cycle == p.compaction_cycles:

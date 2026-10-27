@@ -101,6 +101,23 @@ def test_macrobench_main_reports_a_crashed_task_in_work_and_worker_errors(tmp_pa
     assert (written["work"], written["worker_errors"]) == (e2e["work"], e2e["worker_errors"])
 
 
+def test_macrobench_main_counts_each_data_agent_step_once_after_a_reset(tmp_path):
+    """data_agent resets a batch to an earlier commit and redoes the steps after it:
+    the emitted work counts every step of the batch once. The fake backend has no
+    rebase, so the run ends unsupported once the first batch's steps are done."""
+    config = tmp_path / "data_agent.textproto"
+    config.write_text('run_id: "bb_reset" seed: 7 ' + CONFIGS["data_agent"])
+    suite = FakeSuite(rc.ResultCollector())
+    target, _ = shared_target(suite)
+
+    e2e = macro_runner.main(["--config", str(config), "--outdir", str(tmp_path), "--no-progress"],
+                            target=target, system_name="fake")
+
+    assert e2e["status"].startswith("unsupported: REBASE")
+    assert any(r["name"].startswith("S6.2 batch 1 reset to step 0") for r in e2e["invariants"]["results"])
+    assert e2e["work"] == {"expected": 4, "succeeded": 2, "failed": 0, "skipped": 0}
+
+
 def test_verbs_main_measures_one_point_on_the_target(tmp_path):
     suite = FakeSuite(rc.ResultCollector())
     target, _ = shared_target(suite)
