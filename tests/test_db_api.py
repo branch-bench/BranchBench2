@@ -235,10 +235,10 @@ def test_parquet_output(suite, tmp_path):
     suite.merge("main", "y")
     suite.exec(["SELECT 1"], refs=["main"])
     suite.result_collector.write_to_parquet()
-    df = pq.read_table(os.path.join(tmp_path, "t.parquet")).to_pandas()
-    assert set(df["op_name"]) == {"COMMIT", "MERGE", "READ", "EXEC"}
-    assert set(df["status"]) == {"OK", "UNSUPPORTED"}
-    assert "ref" in df.columns and "exec_id" in df.columns
+    table = pq.read_table(os.path.join(tmp_path, "t.parquet"))
+    assert set(table["op_name"].to_pylist()) == {"COMMIT", "MERGE", "READ", "EXEC"}
+    assert set(table["status"].to_pylist()) == {"OK", "UNSUPPORTED"}
+    assert "ref" in table.column_names and "exec_id" in table.column_names
 
 
 def test_in_flight_ops_and_stall_detection(tmp_path):

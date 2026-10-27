@@ -4,7 +4,7 @@ Runner2: Clean microbenchmark runner for single-operation benchmarks.
 This module provides a cleaner, more maintainable architecture for running
 database microbenchmarks with clear separation of concerns:
 - Configuration loading and validation
-- Backend setup and cleanup
+- Prepared-target execution
 - Untimed setup phase (branches + data)
 - Timed execution phase (measure operations)
 - Result collection and reporting
@@ -19,50 +19,27 @@ Design principles:
 - Clarity: Clear execution flow from config to results
 """
 
-import argparse
-import re
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import random
-import sys
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 from contextlib import contextmanager
 
-import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from google.protobuf import text_format
 from tqdm import tqdm
 
 # Protobuf imports
 from microbench import task2_pb2 as tp
 from dblib import result_pb2 as rslt
 
-# Database backend imports
-from dblib import dolt
-from dblib.dolt import DoltToolSuite, commit_dolt_schema
-from dblib import dolt_mysql
-from dblib.dolt_mysql import DoltMySQLToolSuite
-from dblib import seekdb
-from dblib.seekdb import SeekDBToolSuite
-from dblib import matrixone
-from dblib.matrixone import MatrixOneToolSuite
-from dblib import bauplan
-from dblib.bauplan import BauplanToolSuite
-from dblib import neon as neon_mod
-from dblib.neon import NeonToolSuite
-from dblib.file_copy import FileCopyToolSuite
-from dblib.chronos import ChronosToolSuite
-from dblib import chronos as chronos_mod
-from dblib.xata import XataToolSuite
-from dblib import terminusdb
-from dblib.terminusdb import TerminusDBToolSuite
-from dblib.db_api import DBToolSuite, Ref
+from dblib.db_api import Ref
 from dblib import result_collector as rc
+from dblib.target import ExecutionState, PreparedTarget, SuiteRequest
 
 # Operation imports
 from microbench.operations import (
@@ -114,7 +91,6 @@ VERB_OPERATIONS = frozenset({
 # Utility imports
 from microbench.datagen import DynamicDataGenerator
 from util import db_helpers as dbh
-from util.import_db import load_sql_file
 
 
 # ============================================================================
@@ -138,25 +114,6 @@ class BenchmarkConfig:
         self._proto = config_proto
         self._validate()
 
-    @classmethod
-    def load_from_file(cls, config_path: str) -> 'BenchmarkConfig':
-        """Load configuration from a textproto file.
-
-        Args:
-            config_path: Path to the .textproto config file
-
-        Returns:
-            BenchmarkConfig instance
-
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            Exception: If config parsing fails
-        """
-        config = tp.TaskConfig()
-        with open(config_path, 'r') as f:
-            text_format.Parse(f.read(), config)
-        return cls(config)
-
     def _validate(self) -> None:
         """Validate configuration values.
 
@@ -166,9 +123,6 @@ class BenchmarkConfig:
         # Basic required fields
         if not self._proto.run_id:
             raise ValueError("run_id is required")
-        if not self._proto.database_setup.db_name:
-            raise ValueError("database_setup.db_name is required")
-
         # Validate benchmark mode
         if not self._proto.HasField("operation_benchmark"):
             raise ValueError("operation_benchmark is required")
@@ -184,16 +138,6 @@ class BenchmarkConfig:
                 "Concurrent writes pollute per-thread storage deltas."
             )
 
-        # Backend-specific validation
-        if self._proto.backend == tp.Backend.NEON:
-            db_setup = self._proto.database_setup
-            source_type = db_setup.WhichOneof("source")
-            if source_type == "existing_db":
-                if not db_setup.existing_db.neon_project_id:
-                    raise ValueError(
-                        "neon_project_id required when reusing existing Neon database"
-                    )
-
         # Validate operation is registered
         op_type = op_bench.operation
         if not OperationRegistry.is_registered(op_type):
@@ -205,14 +149,6 @@ class BenchmarkConfig:
     @property
     def run_id(self) -> str:
         return self._proto.run_id
-
-    @property
-    def backend(self) -> tp.Backend:
-        return self._proto.backend
-
-    @property
-    def backend_name(self) -> str:
-        return tp.Backend.Name(self._proto.backend)
 
     @property
     def table_name(self) -> str:
@@ -239,18 +175,6 @@ class BenchmarkConfig:
     def use_async(self) -> bool:
         """Whether to run the async runner (use_async or concurrent_requests > 1)."""
         return self._proto.use_async or self.concurrent_requests > 1
-
-    @property
-    def database_setup(self) -> tp.DatabaseSetup:
-        return self._proto.database_setup
-
-    @property
-    def db_name(self) -> str:
-        return self._proto.database_setup.db_name
-
-    @property
-    def cleanup(self) -> bool:
-        return self._proto.database_setup.cleanup
 
     @property
     def operation_type(self) -> tp.OperationType:
@@ -299,405 +223,11 @@ class BenchmarkConfig:
     def __str__(self) -> str:
         return (
             f"BenchmarkConfig(run_id={self.run_id}, "
-            f"backend={self.backend_name}, "
             f"operation={self.operation_name}, "
             f"num_ops={self.num_ops}, "
             f"num_branches={self.num_branches}, "
             f"scale_factor={self.scale_factor})"
         )
-
-
-# ============================================================================
-# Backend Management
-# ============================================================================
-
-
-@dataclass
-class BackendInfo:
-    """Backend-specific connection and project information."""
-
-    default_uri: str = ""
-    default_branch_id: str = ""
-    # Branch workers start on (the last setup branch once setup has run)
-    default_branch_name: str = ""
-    # The backend's own default branch, which some backends refuse to delete
-    root_branch_name: str = ""
-    neon_project_id: Optional[str] = None
-    xata_project_id: Optional[str] = None
-    file_copy_info: Optional[FileCopyToolSuite.FileCopyInfo] = None
-    chronos_info: Optional[ChronosToolSuite.ChronosInfo] = None
-    setup_branches: list = None
-
-
-def create_db_tools(
-    backend: int,
-    backend_info: BackendInfo,
-    db_name: str,
-    result_collector: rc.ResultCollector,
-    measure_storage: bool = False,
-) -> DBToolSuite:
-    """Open one worker's DBToolSuite on the backend's default branch.
-
-    Shared with the macrobench runner. ``backend`` is a Backend enum value
-    (the microbench and macrobench enums use the same numbering).
-    """
-    default_branch = backend_info.default_branch_name
-    if backend == tp.Backend.DOLT:
-        return DoltToolSuite.init_for_bench(
-            result_collector, db_name, default_branch, measure_storage
-        )
-    if backend == tp.Backend.DOLT_MYSQL:
-        return DoltMySQLToolSuite.init_for_bench(
-            result_collector, db_name, default_branch, measure_storage
-        )
-    if backend == tp.Backend.SEEKDB:
-        return SeekDBToolSuite.init_for_bench(
-            result_collector, db_name, default_branch, measure_storage
-        )
-    if backend == tp.Backend.MATRIXONE:
-        return MatrixOneToolSuite.init_for_bench(
-            result_collector, db_name, default_branch, measure_storage
-        )
-    if backend == tp.Backend.BAUPLAN:
-        return BauplanToolSuite.init_for_bench(
-            result_collector, db_name, default_branch, measure_storage
-        )
-    if backend == tp.Backend.FILE_COPY:
-        return FileCopyToolSuite.init_for_bench(
-            result_collector,
-            db_name,
-            default_branch,
-            backend_info.file_copy_info.branches,
-            backend_info.file_copy_info.branches_lock,
-            backend_info.file_copy_info.create_db_lock,
-            measure_storage,
-        )
-    if backend == tp.Backend.CHRONOS:
-        return ChronosToolSuite.init_for_bench(
-            result_collector, db_name, default_branch, measure_storage
-        )
-    if backend == tp.Backend.TERMINUSDB:
-        return TerminusDBToolSuite.init_for_bench(
-            result_collector, db_name, default_branch, measure_storage
-        )
-    if backend == tp.Backend.NEON:
-        return NeonToolSuite.init_for_bench(
-            result_collector,
-            backend_info.neon_project_id,
-            backend_info.default_branch_id,
-            default_branch,
-            db_name,
-            measure_storage,
-        )
-    if backend == tp.Backend.XATA:
-        return XataToolSuite.init_for_bench(
-            result_collector,
-            backend_info.xata_project_id,
-            backend_info.default_branch_id,
-            default_branch,
-            db_name,
-            measure_storage,
-        )
-    raise ValueError(f"Unsupported backend: {tp.Backend.Name(backend)}")
-
-
-@dataclass
-class BackendSetup:
-    """The parts of a config that BackendManager reads.
-
-    Lets callers without a full BenchmarkConfig (e.g. the macrobench runner)
-    set up a backend. ``database_setup`` may be the microbench or the
-    macrobench DatabaseSetup message; both have the same fields.
-    """
-
-    backend: int
-    database_setup: object
-
-    @property
-    def db_name(self) -> str:
-        return self.database_setup.db_name
-
-    @property
-    def cleanup(self) -> bool:
-        return self.database_setup.cleanup
-
-
-class BackendManager:
-    """Manages backend-specific setup and cleanup.
-
-    Accepts a BenchmarkConfig or a BackendSetup; only backend,
-    database_setup, db_name and cleanup are read.
-    """
-
-    def __init__(self, config, output_dir: str = "/tmp/run_stats"):
-        self.config = config
-        self.output_dir = output_dir
-        self.backend_info: Optional[BackendInfo] = None
-
-    def setup(self) -> BackendInfo:
-        """Create backend project and database, perform setup.
-
-        Returns:
-            BackendInfo with connection details
-
-        Raises:
-            ValueError: If backend is unsupported
-            Exception: If setup fails
-        """
-        config = self.config
-        backend = config.backend
-        db_name = config.db_name
-        source = config.database_setup.WhichOneof("source")
-        # An existing database is reused as is; a sql_dump is loaded; a
-        # "generated" (or unset) source gets an empty database the caller
-        # populates (the macrobench schema generators).
-        require_db_setup = source != "existing_db"
-        sql_dump_path = (config.database_setup.sql_dump.sql_dump_path
-                         if source == "sql_dump" else None)
-
-        info = BackendInfo()
-
-        # Backend-specific project/connection creation
-        if backend == tp.Backend.DOLT:
-            info.default_uri = DoltToolSuite.get_default_connection_uri()
-            info.default_branch_name = "main"
-            print(f"Default Dolt connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.DOLT_MYSQL:
-            info.default_uri = DoltMySQLToolSuite.get_default_connection_uri()
-            info.default_branch_name = "main"
-            print(f"Default Dolt MySQL connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.SEEKDB:
-            info.default_uri = SeekDBToolSuite.get_default_connection_uri()
-            info.default_branch_name = seekdb.MAIN_BRANCH
-            # A SeekDB branch's ID is its database name; main is db_name.
-            info.default_branch_id = db_name
-            print(f"Default SeekDB connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.MATRIXONE:
-            info.default_uri = MatrixOneToolSuite.get_default_connection_uri()
-            info.default_branch_name = matrixone.MAIN_BRANCH
-            # A MatrixOne branch's ID is its database name; main is db_name.
-            info.default_branch_id = db_name
-            print(f"Default MatrixOne connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.BAUPLAN:
-            info.default_uri = BauplanToolSuite.get_default_connection_uri()
-            info.default_branch_name = bauplan.MAIN_BRANCH
-            # The run's root branch is <user>.<db_name>.
-            info.default_branch_id = db_name
-
-        elif backend == tp.Backend.FILE_COPY:
-            info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
-            info.default_uri = FileCopyToolSuite.get_default_connection_uri()
-            info.default_branch_name = db_name
-            print(f"Default FILE_COPY connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.CHRONOS:
-            info.chronos_info = ChronosToolSuite.ChronosInfo(db_name)
-            info.default_uri = ChronosToolSuite.get_default_connection_uri()
-            info.default_branch_name = chronos_mod.MAIN_BRANCH
-            info.root_branch_name = chronos_mod.MAIN_BRANCH
-            print(f"Default CHRONOS connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.TERMINUSDB:
-            info.default_uri = TerminusDBToolSuite.get_default_connection_uri()
-            info.default_branch_name = terminusdb.MAIN_BRANCH
-            print(f"Default TerminusDB server: {info.default_uri}")
-
-        elif backend == tp.Backend.NEON:
-            if require_db_setup:
-                # Leftovers of interrupted runs keep billing: drop them first.
-                # Only this configuration's own projects: another run
-                # (the macrobench's project_macro_* in particular) may be
-                # live in the same org at the same time.
-                project_name = f"project_{db_name}"
-                stale = neon_mod.delete_stale_projects(prefix=project_name)
-                if stale:
-                    print(f"Deleted stale Neon projects: {stale}")
-                neon_project = NeonToolSuite.create_neon_project(project_name)
-                info.neon_project_id = neon_project["project"]["id"]
-                info.default_uri = (
-                    neon_project["connection_uris"][0]["connection_uri"]
-                    if neon_project["connection_uris"]
-                    else ""
-                )
-                info.default_branch_id = neon_project["branch"]["id"]
-                info.default_branch_name = neon_project["branch"]["name"]
-                print(f"Neon project ID: {info.neon_project_id}")
-                print(f"Default Neon connection URI: {re.sub(r'://([^:/]+):[^@]*@', r'://\1:***@', info.default_uri)}")
-            else:
-                info.neon_project_id = config.database_setup.existing_db.neon_project_id
-                proj_branches = NeonToolSuite.get_project_branches(info.neon_project_id)
-                for branch in proj_branches["branches"]:
-                    if branch["default"]:
-                        info.default_branch_name = branch["name"]
-                        info.default_branch_id = branch["id"]
-                        break
-
-        elif backend == tp.Backend.XATA:
-            if require_db_setup:
-                (
-                    xata_project_id,
-                    default_branch_id,
-                    default_branch_name,
-                    default_uri,
-                ) = XataToolSuite.create_xata_project(f"project_{db_name}")
-                info.xata_project_id = xata_project_id
-                info.default_uri = default_uri
-                info.default_branch_id = default_branch_id
-                info.default_branch_name = default_branch_name
-                print(f"Xata project ID: {info.xata_project_id}")
-                print(f"Default Xata connection URI: {info.default_uri}")
-            else:
-                raise NotImplementedError("Xata requires database setup")
-
-        else:
-            raise ValueError(f"Unsupported backend: {tp.Backend.Name(backend)}")
-
-        # Create database and load schema if needed
-        if require_db_setup and backend == tp.Backend.DOLT_MYSQL:
-            # Not a Postgres server, so psql/psycopg2 can't be used to set it up.
-            dolt_mysql.setup_database(db_name, sql_dump_path)
-        elif require_db_setup and backend == tp.Backend.SEEKDB:
-            seekdb.setup_database(db_name, sql_dump_path)
-        elif require_db_setup and backend == tp.Backend.MATRIXONE:
-            matrixone.setup_database(db_name, sql_dump_path)
-        elif require_db_setup and backend == tp.Backend.TERMINUSDB:
-            # No SQL: the dump is converted to a schema and documents.
-            terminusdb.setup_database(db_name, sql_dump_path)
-        elif require_db_setup and backend == tp.Backend.BAUPLAN:
-            bauplan.setup_database(db_name, sql_dump_path)
-        elif require_db_setup:
-            self._create_database(info.default_uri, db_name)
-
-            if sql_dump_path:
-                db_uri = self._get_connection_uri(info)
-                load_sql_file(db_uri, sql_dump_path)
-                # Commit schema changes for Dolt
-                if backend == tp.Backend.DOLT:
-                    commit_dolt_schema(db_uri)
-
-        info.root_branch_name = info.default_branch_name
-        self.backend_info = info
-        return info
-
-    def cleanup(self) -> None:
-        """Clean up backend resources (databases, projects).
-
-        This should be called after the benchmark completes.
-        """
-        if not self.config.cleanup or not self.backend_info:
-            return
-
-        info = self.backend_info
-        db_name = self.config.db_name
-
-        # Backend-specific cleanup
-        if info.file_copy_info:
-            FileCopyToolSuite.cleanup(info.file_copy_info)
-        elif info.chronos_info:
-            ChronosToolSuite.cleanup(info.chronos_info)
-        elif self.config.backend == tp.Backend.DOLT_MYSQL and db_name:
-            try:
-                dolt_mysql.drop_database(db_name)
-            except Exception as e:
-                print(f"Error deleting database: {e}")
-        elif self.config.backend == tp.Backend.SEEKDB and db_name:
-            try:
-                # Also drops every branch database forked from db_name.
-                seekdb.drop_database(db_name)
-            except Exception as e:
-                print(f"Error deleting database: {e}")
-        elif self.config.backend == tp.Backend.TERMINUSDB and db_name:
-            try:
-                terminusdb.drop_database(db_name)
-            except Exception as e:
-                print(f"Error deleting database: {e}")
-        elif self.config.backend == tp.Backend.MATRIXONE and db_name:
-            try:
-                # Also drops every branch database and snapshot of the run.
-                matrixone.drop_database(db_name)
-            except Exception as e:
-                print(f"Error deleting database: {e}")
-        elif self.config.backend == tp.Backend.BAUPLAN and db_name:
-            try:
-                # The run's branches, tags and S3 files.
-                bauplan.drop_database(db_name)
-            except Exception as e:
-                print(f"Error deleting database: {e}")
-        elif info.default_uri and db_name:
-            try:
-                conn = psycopg2.connect(info.default_uri)
-                conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-                cur = conn.cursor()
-                cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
-                print(f"Database '{db_name}' deleted successfully.")
-                cur.close()
-                conn.close()
-                if self.config.backend == tp.Backend.DOLT:
-                    # Dolt keeps dropped databases on disk until purged.
-                    dolt.purge_dropped_databases(info.default_uri)
-            except Exception as e:
-                print(f"Error deleting database: {e}")
-
-        # Delete cloud projects
-        if info.neon_project_id:
-            NeonToolSuite.delete_project(info.neon_project_id)
-        elif info.xata_project_id:
-            XataToolSuite.delete_project(info.xata_project_id)
-
-    def _create_database(self, uri: str, db_name: str) -> None:
-        """Create the benchmark database."""
-        try:
-            conn = psycopg2.connect(uri)
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-            cur = conn.cursor()
-            try:
-                cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
-            except Exception as drop_err:
-                print(f"Warning: could not drop existing database: {drop_err}")
-            cur.execute(f"CREATE DATABASE {db_name};")
-            print(f"Database '{db_name}' created successfully.")
-            cur.close()
-            conn.close()
-        except Exception as e:
-            print(f"Error creating database: {e}")
-            raise
-
-    def _get_connection_uri(self, info: BackendInfo) -> str:
-        """Get the database-specific connection URI."""
-        backend = self.config.backend
-        db_name = self.config.db_name
-
-        if backend == tp.Backend.DOLT:
-            return DoltToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.DOLT_MYSQL:
-            return DoltMySQLToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.SEEKDB:
-            return SeekDBToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.TERMINUSDB:
-            return info.default_uri
-        elif backend == tp.Backend.MATRIXONE:
-            return MatrixOneToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.BAUPLAN:
-            return BauplanToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.FILE_COPY:
-            return FileCopyToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.CHRONOS:
-            return ChronosToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.NEON:
-            return NeonToolSuite._get_neon_connection_uri(
-                info.neon_project_id, info.default_branch_id, db_name
-            )
-        elif backend == tp.Backend.XATA:
-            return XataToolSuite._get_xata_connection_uri(
-                info.xata_project_id, info.default_branch_id, db_name
-            )
-        else:
-            raise ValueError(f"Unsupported backend: {tp.Backend.Name(backend)}")
-
 
 # ============================================================================
 # Setup Phase (UNTIMED)
@@ -714,18 +244,20 @@ class SetupPhase:
     def __init__(
         self,
         config: BenchmarkConfig,
-        backend_info: BackendInfo,
+        target: PreparedTarget,
+        state: ExecutionState,
         output_dir: str = "/tmp/run_stats"
     ):
         self.config = config
-        self.backend_info = backend_info
+        self.target = target
+        self.state = state
         self.output_dir = output_dir
 
-    def execute(self) -> List[str]:
-        """Run the setup phase and return list of created branches.
+    def execute(self) -> ExecutionState:
+        """Run setup and return the ref state for timed execution.
 
         Returns:
-            List of branch names created during setup
+            The final working ref and all refs created during setup.
 
         Raises:
             Exception: If setup fails
@@ -756,7 +288,7 @@ class SetupPhase:
         with self._create_setup_context(
             setup_result_collector, setup_branch_manager
         ) as setup_ctx:
-            last_branch_name, last_branch_id = self._perform_setup_operations(
+            last_branch_name, _ = self._perform_setup_operations(
                 setup_ctx,
                 num_branches,
                 shape,
@@ -765,13 +297,8 @@ class SetupPhase:
                 deletes_per_branch,
             )
 
-            # Update backend info with last branch
-            self.backend_info.default_branch_name = last_branch_name
-            self.backend_info.default_branch_id = last_branch_id
-
         # Get all created branches
         setup_branches = setup_branch_manager.get_all_branches()
-        self.backend_info.setup_branches = setup_branches
 
         # Write setup timing to separate parquet file
         setup_result_collector.write_to_parquet(
@@ -782,7 +309,7 @@ class SetupPhase:
         print(f"Last branch: {last_branch_name}")
         print(f"{'='*60}\n")
 
-        return setup_branches
+        return ExecutionState(last_branch_name, tuple(setup_branches))
 
     @contextmanager
     def _create_setup_context(
@@ -797,7 +324,8 @@ class SetupPhase:
 
         ctx = WorkerContext(
             config=self.config,
-            backend_info=self.backend_info,
+            target=self.target,
+            state=self.state,
             thread_id=0,
             seed=42,  # Fixed seed for reproducible setup
             result_collector=result_collector,
@@ -1036,7 +564,8 @@ class WorkerContext:
     def __init__(
         self,
         config: BenchmarkConfig,
-        backend_info: BackendInfo,
+        target: PreparedTarget,
+        state: ExecutionState,
         thread_id: int,
         seed: int,
         result_collector: rc.ResultCollector,
@@ -1045,7 +574,8 @@ class WorkerContext:
         assigned_branches: List[str],
     ):
         self.config = config
-        self.backend_info = backend_info
+        self.target = target
+        self.state = state
         self.thread_id = thread_id
         self.seed = seed
         self.result_collector = result_collector
@@ -1072,28 +602,17 @@ class WorkerContext:
 
     def __enter__(self) -> 'WorkerContext':
         """Initialize database connection and tools."""
-        config = self.config
-        backend_info = self.backend_info
-
         # Set thread ID for result collection
         rc.set_current_thread_id(self.thread_id)
 
-        # Create result collector
-        result_collector = self.result_collector
-
-        # Initialize backend-specific tools
-        self.db_tools = create_db_tools(
-            config.backend, backend_info, config.db_name, result_collector,
+        self.db_tools = self.target.open_suite(SuiteRequest(
+            result_collector=self.result_collector,
+            initial_ref=self.state.working_ref,
+            worker_index=self.thread_id,
+            setup_refs=self.state.setup_refs,
             measure_storage=self.measure_storage,
-        )
-
-        # Add root branch to manager (except FILE_COPY)
-        if config.backend != tp.Backend.FILE_COPY:
-            self.branch_manager.add_branch(backend_info.default_branch_name)
-        elif config.num_threads > 1 and self.thread_id > 0 and backend_info.setup_branches:
-            # CREATE DATABASE ... TEMPLATE needs no connections on the
-            # template, so idle workers move off the root database.
-            self.connect(backend_info.setup_branches[0], timed=False)
+        ))
+        self.branch_manager.add_branch(self.state.working_ref)
 
         # Connect to assigned branch if multi-threaded
         if self.assigned_branches:
@@ -1246,7 +765,7 @@ class WorkerContext:
     @property
     def root_branch(self) -> str:
         """The backend's default branch (never a deletion target)."""
-        return self.backend_info.root_branch_name
+        return self.target.root_ref
 
     def clear_pk_cache(self) -> None:
         """Clear cached primary keys (e.g., after branch switch)."""
@@ -2055,17 +1574,17 @@ class BenchmarkExecutor:
     def __init__(
         self,
         config: BenchmarkConfig,
-        backend_info: BackendInfo,
-        setup_branches: List[str],
+        target: PreparedTarget,
+        state: ExecutionState,
         result_collector: rc.ResultCollector,
     ):
         self.config = config
-        self.backend_info = backend_info
-        self.setup_branches = setup_branches
+        self.target = target
+        self.state = state
         self.result_collector = result_collector
 
         # Shared state
-        self.branch_manager = SharedBranchManager(initial_branches=setup_branches)
+        self.branch_manager = SharedBranchManager(initial_branches=list(state.setup_refs))
 
     def execute(self) -> dict:
         """Execute the benchmark and return metrics.
@@ -2139,23 +1658,23 @@ class BenchmarkExecutor:
     def _assign_branches_to_threads(self) -> Dict[int, List[str]]:
         """Assign branches to threads for multi-threaded execution."""
         num_threads = self.config.num_threads
-        if not self.setup_branches or num_threads == 1:
+        if not self.state.setup_refs or num_threads == 1:
             return {}
 
         assignments = {}
-        num_branches = len(self.setup_branches)
+        num_branches = len(self.state.setup_refs)
 
         if num_threads <= num_branches:
             # Round-robin assignment
             for tid in range(num_threads):
                 assignments[tid] = [
-                    self.setup_branches[idx]
+                    self.state.setup_refs[idx]
                     for idx in range(tid, num_branches, num_threads)
                 ]
         else:
             # More threads than branches: cyclic assignment
             for tid in range(num_threads):
-                assigned_branch = self.setup_branches[tid % num_branches]
+                assigned_branch = self.state.setup_refs[tid % num_branches]
                 assignments[tid] = [assigned_branch]
 
         return assignments
@@ -2168,7 +1687,8 @@ class BenchmarkExecutor:
 
         with WorkerContext(
             config=self.config,
-            backend_info=self.backend_info,
+            target=self.target,
+            state=self.state,
             thread_id=0,
             seed=seed,
             result_collector=self.result_collector,
@@ -2241,7 +1761,8 @@ class BenchmarkExecutor:
 
             with WorkerContext(
                 config=self.config,
-                backend_info=self.backend_info,
+                target=self.target,
+                state=self.state,
                 thread_id=thread_id,
                 seed=worker_seed,
                 result_collector=self.result_collector,
@@ -2413,11 +1934,15 @@ class ResultManager:
     def __init__(
         self,
         config: BenchmarkConfig,
+        target: PreparedTarget,
+        system_name: str,
         result_collector: rc.ResultCollector,
         metrics: dict,
         output_dir: str,
     ):
         self.config = config
+        self.target = target
+        self.system_name = system_name
         self.result_collector = result_collector
         self.metrics = metrics
         self.output_dir = output_dir
@@ -2438,7 +1963,7 @@ class ResultManager:
         """Write summary JSON with throughput metrics."""
         summary = {
             "run_id": self.config.run_id,
-            "backend": self.config.backend_name,
+            "backend": self.system_name,
             "operation": self.config.operation_name,
             "num_ops": self.config.num_ops,
             "num_threads": self.config.num_threads,
@@ -2458,11 +1983,7 @@ class ResultManager:
             "support": self.metrics.get("support", {}),
         }
         # Server behaviour the backend worked around (retries and the like)
-        suite_class = {
-            tp.Backend.CHRONOS: ChronosToolSuite,
-            tp.Backend.TERMINUSDB: TerminusDBToolSuite,
-        }.get(self.config.backend)
-        observed = getattr(suite_class, "OBSERVED", None)
+        observed = getattr(self.target.suite_type, "OBSERVED", None)
         if observed:
             summary["backend_observations"] = dict(observed)
 
@@ -2484,7 +2005,7 @@ class ResultManager:
         """Write detailed failure information to a separate JSON file."""
         failures_data = {
             "run_id": self.config.run_id,
-            "backend": self.config.backend_name,
+            "backend": self.system_name,
             "operation": self.config.operation_name,
             "total_failures": len(self.result_collector.failed_operations),
             "failures": self.result_collector.failed_operations,
@@ -2551,82 +2072,33 @@ def register_all_operations() -> None:
 
 
 # ============================================================================
-# Main Orchestration
+# Entry point
 # ============================================================================
 
 
-def main():
-    """Main entry point for runner2."""
-    # Parse arguments
-    parser = argparse.ArgumentParser(
-        description="Run database microbenchmarks from task2 config."
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to task2 configuration file (.textproto)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="/tmp/run_stats",
-        help="Directory for output files (default: /tmp/run_stats)",
-    )
-    args = parser.parse_args()
-
-    # Register all operations
+def run(
+    task: tp.TaskConfig,
+    target: PreparedTarget,
+    system_name: str,
+    output_dir: str = "/tmp/run_stats",
+) -> dict:
+    """Run one microbenchmark against a target the embedding application
+    provisioned: the untimed setup phase (when the task asks for setup
+    branches), the timed phase, and the result files under ``output_dir``.
+    ``system_name`` is recorded in the summary. Returns the metrics."""
     register_all_operations()
-
-    # Load configuration
-    try:
-        config = BenchmarkConfig.load_from_file(args.config)
-        print(f"Loaded configuration: {config}")
-    except FileNotFoundError:
-        print(f"Error: Config file not found: {args.config}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error loading config: {e}")
-        sys.exit(1)
-
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # Create shared result collector
+    config = BenchmarkConfig(task)
+    os.makedirs(output_dir, exist_ok=True)
     result_collector = rc.ResultCollector(
-        run_id=config.run_id, output_dir=args.output_dir
+        run_id=config.run_id, output_dir=output_dir
     )
 
-    try:
-        # 1. Setup backend
-        backend_mgr = BackendManager(config, args.output_dir)
-        backend_info = backend_mgr.setup()
+    state = ExecutionState(target.root_ref)
+    if config.num_branches > 0:
+        state = SetupPhase(config, target, state, output_dir).execute()
 
-        # 2. Setup phase (UNTIMED)
-        if config.num_branches > 0:
-            setup_phase = SetupPhase(config, backend_info, args.output_dir)
-            setup_branches = setup_phase.execute()
-        else:
-            setup_branches = []
-            backend_info.setup_branches = []
-
-        # 3. Execute benchmark (TIMED)
-        executor = BenchmarkExecutor(
-            config, backend_info, setup_branches, result_collector
-        )
-        metrics = executor.execute()
-
-        # 4. Write results
-        result_mgr = ResultManager(config, result_collector, metrics, args.output_dir)
-        result_mgr.write_results()
-
-    finally:
-        # 5. Cleanup
-        if backend_mgr:
-            backend_mgr.cleanup()
-
-    print("\nBenchmark complete!")
-
-
-if __name__ == "__main__":
-    main()
+    metrics = BenchmarkExecutor(config, target, state, result_collector).execute()
+    ResultManager(
+        config, target, system_name, result_collector, metrics, output_dir
+    ).write_results()
+    return metrics

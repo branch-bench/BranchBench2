@@ -1,7 +1,5 @@
 # S1 Agentic RL environment: T=16 tasks, G=16 leaves per task, S=30 steps.
 run_id: "macro_rl_env_dolt"
-backend: DOLT
-database_setup { db_name: "macro_rl_env" cleanup: true generated {} }
 schema { base: CH_BENCH scale_factor: 1 }
 workload {
   branch_ops { commit_interval: 1 }

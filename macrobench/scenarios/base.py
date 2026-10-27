@@ -87,6 +87,41 @@ class InvariantRecorder:
         }
 
 
+@dataclass
+class WorkSummary:
+    """Thread-safe logical work outcomes for one scenario run."""
+
+    expected: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    worker_errors: list = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def record(self, outcome: str, count: int = 1) -> None:
+        if outcome not in ("succeeded", "failed", "skipped"):
+            raise ValueError(f"unknown work outcome: {outcome}")
+        with self._lock:
+            setattr(self, outcome, getattr(self, outcome) + count)
+
+    def record_worker_error(self, worker: int, item, error: Exception) -> None:
+        with self._lock:
+            self.worker_errors.append({
+                "worker": int(worker),
+                "item": str(item)[:120],
+                "error": f"{type(error).__name__}: {str(error)[:240]}",
+            })
+
+    def summary(self) -> dict:
+        with self._lock:
+            return {
+                "expected": int(self.expected),
+                "succeeded": int(self.succeeded),
+                "failed": int(self.failed),
+                "skipped": int(self.skipped),
+            }
+
+
 def is_retryable_error(msg: str) -> bool:
     """Errors worth retrying after a wait: Neon/Xata rate- and
     resource-limit errors, a connection the server dropped (a compute
@@ -120,8 +155,10 @@ class ScenarioContext:
     log: Callable[[str], None] = print
     metrics: dict = field(default_factory=dict)
     worker_conns: dict = field(default_factory=dict)
+    work: WorkSummary = field(default_factory=WorkSummary)
     _slots: Optional[threading.BoundedSemaphore] = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _work_local: threading.local = field(default_factory=threading.local)
 
     def __post_init__(self):
         self.seed = self.config.seed or 42
@@ -185,14 +222,23 @@ class ScenarioContext:
             raise ScenarioStopped()
 
     def tick(self, n: int = 1) -> None:
+        outcome = getattr(self._work_local, "pending_outcome", "succeeded")
+        self._work_local.pending_outcome = "succeeded"
+        self._work_local.worker_ticks = getattr(self._work_local, "worker_ticks", 0) + n
+        self.work.record(outcome, n)
         if self.progress is not None:
             self.progress.update(n)
 
     def note(self, msg: str) -> None:
+        text = str(msg or "")
+        if "not run:" in text or ("UNSUPPORTED" in text and ("branch" in text or "candidate" in text)):
+            self._work_local.pending_outcome = "skipped"
+        elif "FAILED" in text and ("branch" in text or "candidate" in text):
+            self._work_local.pending_outcome = "failed"
         if self.progress is not None:
-            self.progress.write(msg)
+            self.progress.write(text)
         else:
-            self.log(msg)
+            self.log(text)
 
     def add_metric(self, key: str, value) -> None:
         with self._lock:
@@ -255,12 +301,23 @@ class ScenarioContext:
 
         def task(i, item):
             w = init_worker()
+            ticks_before = getattr(self._work_local, "worker_ticks", 0)
             try:
                 results[i] = fn(w, item)
+                result = results[i]
+                if isinstance(result, dict) and "batch" in result and "rows" in result:
+                    steps = int(getattr(getattr(self.config.workload, "data_agent", None), "steps_per_batch", 0) or 0)
+                    ticks_done = getattr(self._work_local, "worker_ticks", 0) - ticks_before
+                    if steps > ticks_done:
+                        missing = steps - ticks_done
+                        self._work_local.worker_ticks = getattr(self._work_local, "worker_ticks", 0) + missing
+                        self.work.record("succeeded", missing)
             except ScenarioStopped as e:
                 results[i] = e
             except Exception as e:
                 results[i] = e
+                self.work.record_worker_error(w.id, item, e)
+                self.work.record("failed")
                 self.note(f"[W{w.id}] {type(e).__name__}: {e}")
             return i
 

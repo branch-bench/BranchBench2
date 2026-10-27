@@ -2,7 +2,8 @@ syntax = "proto3";
 
 package microbench2;
 
-// Backend database systems
+// Deprecated: the embedding application selects the database system. Kept
+// so older configs still parse; the runner never reads it.
 enum Backend {
   NEON = 0;
   DOLT = 1;
@@ -66,7 +67,8 @@ enum BranchShape {
   BUSHY = 2;    // Random parent selection
 }
 
-// Existing database reference (for reusing pre-created databases)
+// Deprecated with DatabaseSetup: the embedding application provisions the
+// database and hands the runner a dblib.target.PreparedTarget.
 message ExistingDatabase {
   string branch_id = 1;
   string neon_project_id = 2;
@@ -77,7 +79,7 @@ message SqlDump {
   string sql_dump_path = 1;
 }
 
-// Database setup configuration
+// Deprecated: ignored by the runner (see ExistingDatabase).
 message DatabaseSetup {
   string db_name = 1;
   bool cleanup = 2;  // Whether to cleanup after benchmark
@@ -149,9 +151,9 @@ message OperationBenchmark {
 // Main task configuration
 message TaskConfig {
   string run_id = 1;
-  Backend backend = 2;
+  Backend backend = 2 [deprecated = true];
   string table_name = 3;
-  DatabaseSetup database_setup = 4;
+  DatabaseSetup database_setup = 4 [deprecated = true];
 
   // Scale factor (e.g., number of warehouses in TPCC schema)
   int32 scale_factor = 5;

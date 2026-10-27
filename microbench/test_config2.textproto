@@ -1,19 +1,11 @@
-# Sample configuration for runner2.py
-# This demonstrates a simple READ operation benchmark with branch setup
+# Sample configuration for microbench.runner2.run()
+# This demonstrates a simple READ operation benchmark with branch setup.
+# The embedding application provisions the database and passes a
+# dblib.target.PreparedTarget; the table below must exist in it.
 
 run_id: "test_read_benchmark"
-backend: DOLT
 table_name: "customer"
 scale_factor: 1
-
-# Database setup: use existing tpcc schema
-database_setup {
-  db_name: "tpcc_test"
-  cleanup: true
-  sql_dump {
-    sql_dump_path: "schemas/tpcc_mini.sql"
-  }
-}
 
 # Benchmark settings
 num_threads: 1

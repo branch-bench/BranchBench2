@@ -51,7 +51,7 @@ NEEDS_MERGE = {"context_mgmt", "multi_agent", "dev_agent", "data_agent"}
 
 def _config(key: str) -> tp.MacroBenchConfig:
     cfg = tp.MacroBenchConfig()
-    text_format.Parse('run_id: "t" database_setup { db_name: "t" } seed: 7 ' + CONFIGS[key], cfg)
+    text_format.Parse('run_id: "t" seed: 7 ' + CONFIGS[key], cfg)
     return cfg
 
 

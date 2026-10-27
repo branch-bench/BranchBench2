@@ -4,8 +4,6 @@
 # throughput and p99 against the S5 run of the same backend. ops_agent
 # params are kept only to pass validation.
 run_id: "macro_spine_only_ops_agent_dolt"
-backend: DOLT
-database_setup { db_name: "macro_spine_only_ops_agent" cleanup: true generated {} }
 schema { base: CH_BENCH scale_factor: 1 }
 spine_only_sec: 300
 workload {

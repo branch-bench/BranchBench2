@@ -4,8 +4,6 @@
 # commits. Compare its spine throughput and p99 against the S4 run of the
 # same backend. dev_agent params are kept only to pass validation.
 run_id: "macro_spine_only_dev_agent_dolt"
-backend: DOLT
-database_setup { db_name: "macro_spine_only_dev_agent" cleanup: true generated {} }
 schema { base: CH_BENCH scale_factor: 1 }
 spine_only_sec: 300
 workload {

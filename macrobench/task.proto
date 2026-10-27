@@ -6,7 +6,6 @@ package macrobench;
 // Macrobenchmark configuration: one scenario (workload) over one schema.
 //
 // A run is described by
-//   * database_setup  -- where the database lives and how it is created;
 //   * schema          -- the base schema (CH-benCHmark by default, generated
 //                        at a scale factor) plus per-scenario extensions;
 //   * workload        -- which scenario runs, its structural parameters
@@ -14,11 +13,17 @@ package macrobench;
 //                        (how much SQL each exec() step issues, how much
 //                        concurrent spine traffic there is).
 //
+// The database itself is provisioned by the embedding application, which
+// hands the runner a dblib.target.PreparedTarget. The backend and
+// database_setup fields below are deprecated: the runner ignores them and
+// they are not part of a workload's identity.
+//
 // Each scenario ships two textprotos in macrobench/configs: <name>.textproto
 // with the paper's parameters and <name>_mini.textproto for smoke runs.
 // ============================================================================
 
-// All supported database backends (mirrors microbench)
+// Deprecated: the embedding application selects the database system. Kept
+// so older configs still parse; the runner never reads it.
 enum Backend {
     NEON = 0;
     DOLT = 1;
@@ -32,7 +37,8 @@ enum Backend {
 }
 
 // ---------------------------------------------------------------------------
-// Database setup
+// Database setup (deprecated: the embedding application provisions the
+// database and the runner always generates schema and data)
 // ---------------------------------------------------------------------------
 
 // Reuse an existing database (schema and data already in place).
@@ -294,8 +300,8 @@ message Invariants {
 // Top-level macrobenchmark configuration
 message MacroBenchConfig {
     string run_id = 1;
-    Backend backend = 2;
-    DatabaseSetup database_setup = 3;
+    Backend backend = 2 [deprecated = true];
+    DatabaseSetup database_setup = 3 [deprecated = true];
     SchemaConfig schema = 4;
     Workload workload = 5;
     // Measure storage (disk_size_before/after) around each timed operation
