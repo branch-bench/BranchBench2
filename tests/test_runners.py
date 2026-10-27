@@ -12,6 +12,7 @@ from dblib.target import PreparedTarget, SuiteRequest
 from macrobench import faults
 from macrobench import runner as macro_runner
 from macrobench import task_pb2 as mtp
+from macrobench.scenarios import base as scenario_base
 from macrobench.datagen.ch import CHScale
 from microbench import runner2, task2_pb2 as tp
 from microbench.verbs import driver
@@ -84,7 +85,8 @@ def test_macrobench_main_runs_a_scenario_and_reports_work(tmp_path):
 
 def test_macrobench_main_reports_a_crashed_task_in_work_and_worker_errors(tmp_path):
     """rl_env runs its tasks on the caller's thread (worker_threads unset): a task that
-    raises is still one failed unit of work and one worker error in the emitted stats."""
+    raises is a worker error in the emitted stats, and the units it never reached stay
+    unfinished rather than being counted as failed."""
     config = tmp_path / "rl_env.textproto"
     config.write_text('run_id: "bb_crash" seed: 7 ' + CONFIGS["rl_env"])
     suite = FakeSuite(rc.ResultCollector())
@@ -95,10 +97,62 @@ def test_macrobench_main_reports_a_crashed_task_in_work_and_worker_errors(tmp_pa
                                 target=target, system_name="fake")
 
     assert e2e["status"] == "completed"
-    assert e2e["work"] == {"expected": 6, "succeeded": 0, "failed": 2, "skipped": 0}
+    assert e2e["work"] == {"expected": 6, "succeeded": 0, "failed": 0, "skipped": 0}
     assert [e["error"] for e in e2e["worker_errors"]] == ["ValueError: boom"] * 2
     written = json.loads((tmp_path / "bb_crash_e2e_stats.json").read_text())
     assert (written["work"], written["worker_errors"]) == (e2e["work"], e2e["worker_errors"])
+
+
+def test_macrobench_main_replaces_a_failed_rollout_without_counting_it(tmp_path):
+    """A rollout whose branch fails is replaced by the next round: the group still
+    fills, the work counts only the accepted leaves, and nothing is a worker error."""
+    class FlakyBranchSuite(FakeSuite):
+        failed_once = False
+
+        def _branch_impl(self, name, from_ref):
+            if name == "task_1_r1" and not FlakyBranchSuite.failed_once:
+                FlakyBranchSuite.failed_once = True
+                raise RuntimeError("simulated branch failure")
+            super()._branch_impl(name, from_ref)
+
+    config = tmp_path / "rl_env.textproto"
+    config.write_text('run_id: "bb_flaky" seed: 7 ' + CONFIGS["rl_env"])
+    suite = FlakyBranchSuite(rc.ResultCollector())
+    target, _ = shared_target(suite)
+
+    e2e = macro_runner.main(["--config", str(config), "--outdir", str(tmp_path), "--no-progress"],
+                            target=target, system_name="fake")
+
+    assert e2e["status"] == "completed"
+    assert e2e["work"] == {"expected": 6, "succeeded": 6, "failed": 0, "skipped": 0}
+    assert e2e["metrics"]["rollouts_replaced"] == 1 and e2e["metrics"]["leaves"] == 4
+    assert e2e["worker_errors"] == []
+
+
+def test_macrobench_main_ends_the_run_on_a_failed_check_in_a_worker(tmp_path):
+    """With fail_fast on, a check that fails inside a worker ends the run as
+    invariant_failed after the worker suites are closed, without inventing failed
+    work units or worker errors."""
+    config = tmp_path / "rl_env.textproto"
+    config.write_text('run_id: "bb_check" seed: 7 invariants { fail_fast: true } ' + CONFIGS["rl_env"])
+    suite = FakeSuite(rc.ResultCollector())
+    target, _ = shared_target(suite)
+    original = scenario_base.InvariantRecorder.expect
+
+    def mismatched(self, name, actual, expected, detail=""):
+        return original(self, name, actual, "forced mismatch" if name.startswith("S1.1") else expected, detail)
+
+    with mock.patch.object(scenario_base.InvariantRecorder, "expect", mismatched):
+        e2e = macro_runner.main(["--config", str(config), "--outdir", str(tmp_path), "--no-progress"],
+                                target=target, system_name="fake")
+
+    assert e2e["status"].startswith("invariant_failed: S1.1")
+    assert e2e["invariants"]["failed"] >= 1 and e2e["invariants"]["all_passed"] is False
+    work = e2e["work"]
+    assert work["failed"] == 0 and work["succeeded"] + work["skipped"] <= work["expected"]
+    assert e2e["worker_errors"] == []
+    assert suite.conn is None, "the worker suites were closed before the failure surfaced"
+    assert (tmp_path / "bb_check_e2e_stats.json").is_file() and (tmp_path / "bb_check.parquet").is_file()
 
 
 def test_macrobench_main_counts_each_data_agent_step_once_after_a_reset(tmp_path):

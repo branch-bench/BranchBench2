@@ -143,19 +143,21 @@ class RlEnvScenario(Scenario):
             results = ctx.run_workers(plan, run_rollout, threads=len(plan),
                                       thread_base=1000 * task_id)
             for item, r in zip(plan, results):
-                if not isinstance(r, dict):
-                    if isinstance(r, ScenarioStopped):
-                        raise r
-                    continue        # the pool accounted the crashed rollout
+                if isinstance(r, ScenarioStopped):
+                    raise r
+                if not isinstance(r, dict) or not r["leaf"]:
+                    # A rollout that crashed or could not branch is replaced
+                    # by the next round; only a leaf is a unit of the group.
+                    ctx.bump_metric("rollouts_replaced")
+                    continue
                 steps_total += r["steps"]
                 recorded.extend(r["recorded"])
                 with ctx._lock:
                     self._touched_steps.update(r["touched_steps"])
                     self._touched[r["branch"]] = r["touched"]
                     self._ddl[r["branch"]] = r["ddl"]
-                if r["leaf"]:
-                    leaves.append(r["leaf"])
-                ctx.tick(outcome="succeeded" if r["leaf"] else "failed")
+                leaves.append(r["leaf"])
+                ctx.tick()
 
         # 3. Score the group: cross-branch consistency read + diff per leaf.
         leaf_refs = [b for b, _ in leaves]

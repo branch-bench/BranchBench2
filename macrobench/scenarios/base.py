@@ -277,8 +277,10 @@ class ScenarioContext:
         """Run ``fn(worker, item)`` over ``items`` on a pool of threads, each
         with its own suite (``worker.suite``), rng (``worker.rng``) and id.
         Returns the list of return values (or exceptions) in item order.
-        A worker that raises is one failed unit of work with a worker
-        error; every other unit is accounted by the scenario's tick()."""
+        The scenario accounts its own units through tick(); a worker that
+        raises unexpectedly is recorded as a worker error only. A failed
+        check under fail_fast stops the other workers and is raised here
+        once every worker suite is closed."""
         threads = threads or self.worker_threads
         threads = max(1, min(threads, len(items) or 1))
         results = [None] * len(items)
@@ -301,10 +303,12 @@ class ScenarioContext:
                 results[i] = fn(w, item)
             except ScenarioStopped as e:
                 results[i] = e
+            except InvariantFailed as e:
+                results[i] = e
+                self.cancel_all(f"invariant failed: {e}")
             except Exception as e:
                 results[i] = e
                 self.work.record_worker_error(w.id, item, e)
-                self.work.record("failed")
                 self.note(f"[W{w.id}] {type(e).__name__}: {e}")
             return i
 
@@ -314,9 +318,7 @@ class ScenarioContext:
             for i, item in enumerate(items):
                 task(i, item)
             self.close_suite(w.suite)
-            if self.unsupported_abort:
-                raise UnsupportedOperationAbort(self.unsupported_abort)
-            return results
+            return self._pool_done(results)
 
         workers_made = []
         with ThreadPoolExecutor(max_workers=threads) as pool:
@@ -331,10 +333,17 @@ class ScenarioContext:
                     self.close_suite(w.suite)
             for _ in range(threads):
                 pool.submit(closer).result()
-        # A worker's unsupported verb ended the run: surface it on the
-        # caller's thread too, so the scenario does not go on without it.
+        return self._pool_done(results)
+
+    def _pool_done(self, results: list) -> list:
+        """Every worker suite is closed. An unsupported verb or a failed
+        check seen by a worker ends the run on the caller's thread too, so
+        the scenario does not go on without it."""
         if self.unsupported_abort:
             raise UnsupportedOperationAbort(self.unsupported_abort)
+        for r in results:
+            if isinstance(r, InvariantFailed):
+                raise r
         return results
 
     # -- branch helpers ----------------------------------------------------
