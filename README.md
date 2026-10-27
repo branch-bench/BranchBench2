@@ -1,6 +1,6 @@
 # BranchBench benchmark engine
 
-The database-neutral core of BranchBench: the git-like database API
+The shared core of BranchBench: the git-like database API
 (`dblib/db_api.py`), the microbenchmark runners (single operations and the
 branch-verb scaling grid) and the six agent-workflow macrobenchmark scenarios
 S1-S6, with their result collection, configs, schemas and the CH-benCHmark
@@ -8,10 +8,15 @@ dataset. Every operation is timed and storage-measured; an operation that
 errors is recorded and the workload goes on, while one the adapter cannot
 perform ends the run as unsupported, naming the verb.
 
-This package knows no concrete database system. An embedding application
-(the BranchBench leaderboard) implements one `DBToolSuite` adapter per
-system, provisions a database, and hands the runners a prepared target.
-Nothing here imports, selects or configures a database system.
+This package owns no concrete adapter, no database lifecycle (provisioning,
+loading, start and stop, deletion), no vendor SDK or hosted-service
+dependency, and no system selection. An embedding application (the
+BranchBench leaderboard) implements one `DBToolSuite` adapter per system,
+provisions a database, and hands the runners a prepared target. The engine
+does contain cross-dialect workload behaviour: the scenarios, the schema
+loader and the CH-benCHmark loaders issue SQL for both the Postgres and the
+MySQL dialect, and `util/` depends on the generic `psycopg2` and `pymysql`
+drivers for that.
 
 ## Quick Start
 
