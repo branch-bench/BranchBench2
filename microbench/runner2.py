@@ -9,8 +9,10 @@ database microbenchmarks with clear separation of concerns:
 - Timed execution phase (measure operations)
 - Result collection and reporting
 
-Usage:
-    python -m microbench.runner2 --config path/to/config.textproto
+Usage (there is no command line; the embedding application provisions the
+database and passes it as a dblib.target.PreparedTarget):
+    from microbench import runner2
+    metrics = runner2.run(task_config, target, "MySystem", output_dir)
 
 Design principles:
 - Single Responsibility: Each class has one clear purpose
