@@ -3,11 +3,13 @@ the embedding application provisions a database and passes a
 PreparedTarget; the runners never choose or build a database system."""
 
 import json
+import threading
 from unittest import mock
 
 from google.protobuf import text_format
 
 from dblib import result_collector as rc
+from dblib.db_api import Ref
 from dblib.target import PreparedTarget, SuiteRequest
 from macrobench import faults
 from macrobench import runner as macro_runner
@@ -153,6 +155,59 @@ def test_macrobench_main_ends_the_run_on_a_failed_check_in_a_worker(tmp_path):
     assert e2e["worker_errors"] == []
     assert suite.conn is None, "the worker suites were closed before the failure surfaced"
     assert (tmp_path / "bb_check_e2e_stats.json").is_file() and (tmp_path / "bb_check.parquet").is_file()
+
+
+def test_macrobench_main_closes_every_worker_suite_exactly_once(tmp_path):
+    """Workers run concurrently on distinct suites of one database. Every suite the run
+    opened is closed exactly once by the time main returns, after a complete run and
+    after a suite could not even be opened for one worker."""
+    class Connection(FakeSuite):
+        """One shared in-memory database; each instance is its own connection to it."""
+        shared, live, peak, lock = None, 0, 0, threading.Lock()
+
+        def __init__(self, result_collector=None, measure_storage=False):
+            super().__init__(result_collector, measure_storage)
+            if Connection.shared is None:
+                Connection.shared = (self.branches, self.commits, self.history)
+            self.branches, self.commits, self.history = Connection.shared
+            self._connect_impl(Ref("main"))
+            self.closes = 0
+            with Connection.lock:
+                Connection.live += 1
+                Connection.peak = max(Connection.peak, Connection.live)
+
+        def close_connection(self):
+            super().close_connection()
+            self.closes += 1
+            with Connection.lock:
+                Connection.live -= 1
+
+    def run(name, fail_at=None):
+        Connection.shared, Connection.live, Connection.peak = None, 0, 0
+        opened = []
+
+        def open_suite(request: SuiteRequest):
+            if fail_at == len(opened) + 1:
+                raise RuntimeError("simulated connection failure")
+            opened.append(Connection(request.result_collector))
+            return opened[-1]
+
+        config = tmp_path / f"{name}.textproto"
+        config.write_text(f'run_id: "{name}" seed: 7 ' + CONFIGS["rl_env"].replace("data_ops {", "data_ops { worker_threads: 2", 1))
+        e2e = macro_runner.main(["--config", str(config), "--outdir", str(tmp_path), "--no-progress"],
+                                target=PreparedTarget("main", Connection, open_suite), system_name="fake")
+        assert [s.closes for s in opened] == [1] * len(opened), "every opened suite was closed exactly once"
+        assert all(s.conn is None for s in opened) and Connection.live == 0, "no connection remains"
+        return e2e, opened
+
+    e2e, opened = run("bb_pool")
+    assert e2e["status"] == "completed" and e2e["worker_errors"] == []
+    assert e2e["work"] == {"expected": 6, "succeeded": 6, "failed": 0, "skipped": 0}
+    assert len(opened) >= 4 and Connection.peak >= 3, "the setup suite and concurrent worker suites were open together"
+
+    e2e, opened = run("bb_pool_fail", fail_at=2)  # the first worker suite after the setup suite
+    assert e2e["status"].startswith("crashed: RuntimeError: simulated connection failure")
+    assert len(opened) >= 1 and Connection.live == 0
 
 
 def test_macrobench_main_counts_each_data_agent_step_once_after_a_reset(tmp_path):

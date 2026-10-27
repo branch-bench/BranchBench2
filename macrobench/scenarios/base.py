@@ -274,9 +274,12 @@ class ScenarioContext:
 
     def run_workers(self, items: list, fn: Callable, threads: int = None,
                     thread_base: int = 1) -> list:
-        """Run ``fn(worker, item)`` over ``items`` on a pool of threads, each
+        """Run ``fn(worker, item)`` over ``items`` on ``threads`` workers, each
         with its own suite (``worker.suite``), rng (``worker.rng``) and id.
         Returns the list of return values (or exceptions) in item order.
+        A worker opens its suite on its first item and closes it on its own
+        thread once the items run out, whatever the items did, so every
+        suite this call opened is closed exactly once before it returns.
         The scenario accounts its own units through tick(); a worker that
         raises unexpectedly is recorded as a worker error only. A failed
         check under fail_fast stops the other workers and is raised here
@@ -284,21 +287,13 @@ class ScenarioContext:
         threads = threads or self.worker_threads
         threads = max(1, min(threads, len(items) or 1))
         results = [None] * len(items)
-        local = threading.local()
+        pending = list(enumerate(items))
 
-        def init_worker():
-            idx = getattr(local, "idx", None)
-            if idx is None:
-                with self._lock:
-                    idx = self._worker_counter = getattr(self, "_worker_counter", 0) + 1
-                local.idx = idx
-                rc.set_current_thread_id(thread_base + idx)
-                local.worker = Worker(self, thread_base + idx, self.new_suite(),
-                                      self.worker_rng(idx))
-            return local.worker
+        def next_item():
+            with self._lock:
+                return pending.pop(0) if pending else None
 
-        def task(i, item):
-            w = init_worker()
+        def run_item(w, i, item):
             try:
                 results[i] = fn(w, item)
             except ScenarioStopped as e:
@@ -310,29 +305,28 @@ class ScenarioContext:
                 results[i] = e
                 self.work.record_worker_error(w.id, item, e)
                 self.note(f"[W{w.id}] {type(e).__name__}: {e}")
-            return i
+
+        def work():
+            w = None
+            try:
+                while (pair := next_item()) is not None:
+                    if w is None:
+                        with self._lock:
+                            idx = self._worker_counter = getattr(self, "_worker_counter", 0) + 1
+                        rc.set_current_thread_id(thread_base + idx)
+                        w = Worker(self, thread_base + idx, self.new_suite(), self.worker_rng(idx))
+                    run_item(w, *pair)
+            finally:
+                if w is not None:
+                    self.close_suite(w.suite)
 
         if threads == 1:
             # Same thread as the caller keeps suites/thread ids simple.
-            w = init_worker()
-            for i, item in enumerate(items):
-                task(i, item)
-            self.close_suite(w.suite)
-            return self._pool_done(results)
-
-        workers_made = []
-        with ThreadPoolExecutor(max_workers=threads) as pool:
-            futures = [pool.submit(task, i, item) for i, item in enumerate(items)]
-            for f in futures:
-                f.result()
-            # Close suites on their own threads.
-            def closer():
-                w = getattr(local, "worker", None)
-                if w is not None:
-                    workers_made.append(w)
-                    self.close_suite(w.suite)
-            for _ in range(threads):
-                pool.submit(closer).result()
+            work()
+        else:
+            with ThreadPoolExecutor(max_workers=threads) as pool:
+                for f in [pool.submit(work) for _ in range(threads)]:
+                    f.result()
         return self._pool_done(results)
 
     def _pool_done(self, results: list) -> list:
