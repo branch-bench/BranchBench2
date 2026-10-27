@@ -23,7 +23,8 @@ def compile_protos():
         print(f"Compiling {proto_file}...")
         try:
             subprocess.run(
-                ["protoc", f"--python_out=.", str(proto_file)],
+                [sys.executable, "-m", "grpc_tools.protoc", "-I.",
+                 "--python_out=.", str(proto_file)],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -32,21 +33,6 @@ def compile_protos():
         except subprocess.CalledProcessError as e:
             print(f"Error compiling {proto_file}: {e.stderr}", file=sys.stderr)
             return False
-        except FileNotFoundError:
-            print(
-                "Warning: protoc not found. Skipping proto compilation.",
-                file=sys.stderr,
-            )
-            print(
-                "  To compile protos, install protobuf compiler:",
-                file=sys.stderr,
-            )
-            print("    macOS: brew install protobuf", file=sys.stderr)
-            print(
-                "    Ubuntu: apt-get install protobuf-compiler", file=sys.stderr
-            )
-            return True  # Don't fail the build, just warn
-
     return True
 
 
@@ -56,14 +42,11 @@ class BuildWithProtos(_build_py):
     def run(self):
         """Run proto compilation then proceed with normal build."""
         if not compile_protos():
-            print(
-                "Proto compilation failed, but continuing with build...",
-                file=sys.stderr,
-            )
+            raise RuntimeError("protobuf compilation failed")
 
         # Call the parent class's run method to do the actual build
         super().run()
 
 
 if __name__ == "__main__":
-    compile_protos()
+    sys.exit(0 if compile_protos() else 1)

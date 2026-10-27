@@ -1,0 +1,10 @@
+include build_protos.py
+include README.md
+recursive-include dblib *.proto
+recursive-include microbench *.proto *.textproto
+recursive-include macrobench *.proto *.textproto *.sql
+recursive-include db_setup *.sql *.sh
+global-exclude *_pb2.py
+prune tests
+prune scripts
+prune run_stats_final
