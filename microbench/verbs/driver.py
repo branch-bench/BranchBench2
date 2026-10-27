@@ -1,10 +1,13 @@
 """Branch-verb microbenchmark: the cost of each verb against the one
 quantity it depends on, on the macrobenchmark's schema and data.
 
-    python -m microbench.verbs --backend dolt --scale 1 --outdir run_stats/micro_verbs/dolt
-        [--verbs branch,commit] [--axes rows,scale] [--reps 10] [--warmup 3] [--no-gc]
+    from microbench.verbs import driver
+    driver.run(["--scale", "1", "--outdir", out, "--verbs", "branch,commit"],
+                target=prepared_target, system_name="dolt")
 
-One run is one (backend, W): the CH-benCHmark data is generated at W
+The embedding application provisions the database and passes it as a
+dblib.target.PreparedTarget; deleting it afterwards is the application's
+job too. One run is one (system, W): the CH-benCHmark data is generated at W
 warehouses and committed as the base, then every point of the grid
 (microbench/verbs/grid.py) runs on a branch forked from the base and
 deleted afterwards, so no point sees another's state. A point is
@@ -14,44 +17,39 @@ with the backend's storage read before and after (after a flush), and,
 for branch and commit, once more after FOLLOW_UP_ROWS updates on the new
 branch. The control point measures those follow-up writes alone.
 
-Outputs, under --outdir: ``micro_verbs_<backend>_w<W>.parquet`` (one row
+Outputs, under --outdir: ``micro_verbs_<system>_w<W>.parquet`` (one row
 per timed verb, as the macrobench records them) and
-``micro_verbs_<backend>_w<W>_stats.json`` (per point: parameters, status,
+``micro_verbs_<system>_w<W>_stats.json`` (per point: parameters, status,
 the latency and storage delta of every rep, and their quantiles).
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import os
 import statistics
 import sys
+import threading
 import time
 import traceback
 
 from dblib import result_collector as rc
+from dblib.connector import prepared_database
 from dblib.db_api import native_only
+from dblib.target import PreparedTarget, SuiteRequest
 from macrobench import schema as mschema
 from macrobench import task_pb2 as tp
 from macrobench.datagen.ch import CHScale, seed_ch
-from macrobench.runner import _implementation_for
-from microbench.runner2 import BackendManager, BackendSetup, create_db_tools
+from macrobench.runner import implementation_report
 from microbench.verbs.grid import BASE, FOLLOW_UP_ROWS, STOCK_ROWS, VERBS, points_for_run
 from microbench.verbs.ops import CONTROL, VERB_IMPL, Ctx, drop, follow_up, fork
 
 CONTROL_REPS = 3
 
 
-def _flush(suite, backend, spine):
-    """Make the backend's storage reading reflect what was written:
-    CHECKPOINT where the engine speaks Postgres (ignored elsewhere),
-    MatrixOne's own checkpoint (its gc), then sync."""
-    try:
-        suite.exec(["CHECKPOINT"], refs=[spine], timed=False)
-    except Exception:
-        pass
-    if backend == tp.Backend.MATRIXONE:
-        suite.gc()
-    os.sync()
+def _flush(suite, spine):
+    suite.flush(spine)
 
 
 def _quantiles(xs):
@@ -62,7 +60,7 @@ def _quantiles(xs):
     return {"n": len(xs), "p50": statistics.median(xs), "p10": q[0], "p90": q[8], "min": xs[0], "max": xs[-1]}
 
 
-def run_point(point_id, verb, params, suite, backend, spine, point_branch, *, reps, warmup,
+def run_point(point_id, verb, params, suite, spine, point_branch, *, reps, warmup,
               storage_reps, stock_rows, log, new_suite=None):
     """All reps of one point on ``point_branch``. Returns the summary."""
     ctx = Ctx(suite=suite, point=point_branch, stock_rows=stock_rows, log=log, new_suite=new_suite)
@@ -81,7 +79,7 @@ def run_point(point_id, verb, params, suite, backend, spine, point_branch, *, re
             if measure:
                 # What the rep's own preparation adds (a commit's rows are
                 # written before the commit; that is where Dolt pays).
-                _flush(suite, backend, spine)
+                _flush(suite, spine)
                 s_pre = suite._safe_storage()
             t1 = time.time()
             rs = verb.prepare_rep(ctx, params, ps)
@@ -89,7 +87,7 @@ def run_point(point_id, verb, params, suite, backend, spine, point_branch, *, re
             try:
                 s0 = s1 = s2 = None
                 if measure:
-                    _flush(suite, backend, spine)
+                    _flush(suite, spine)
                     s0 = suite._safe_storage()
                     rep["prep_delta"] = s0 - s_pre
                 res = verb.run(ctx, params, ps, rs, timed, point_id)
@@ -112,7 +110,7 @@ def run_point(point_id, verb, params, suite, backend, spine, point_branch, *, re
                         out["unsupported"] = res.error
                         return out
                 if measure and res is not None:
-                    _flush(suite, backend, spine)
+                    _flush(suite, spine)
                     s1 = suite._safe_storage()
                     rep["storage_delta"] = s1 - s0
                 ok = res is None or res.ok
@@ -121,7 +119,7 @@ def run_point(point_id, verb, params, suite, backend, spine, point_branch, *, re
                     follow_up(suite, verb.deferred_ref(rs), i, stock_rows)
                     out["prep_sec"] += time.time() - t2
                     if measure:
-                        _flush(suite, backend, spine)
+                        _flush(suite, spine)
                         s2 = suite._safe_storage()
                         rep["deferred_delta"] = s2 - s0
             finally:
@@ -151,12 +149,12 @@ def _fmt_bytes(b):
         b /= 1024
 
 
-def main(argv=None):
+def _argument_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", required=True, help="dolt | dolt_mysql | seekdb | matrixone | file_copy | chronos | neon")
+    ap.add_argument("--backend", help="Database integration")
+    ap.add_argument("--db-name", default="micro_verbs")
     ap.add_argument("--scale", type=int, default=BASE["scale"], help="W warehouses of CH data (default 1)")
     ap.add_argument("--outdir", required=True)
-    ap.add_argument("--db-name", default="micro_verbs")
     ap.add_argument("--verbs", help="comma-separated subset of " + ",".join(VERBS))
     ap.add_argument("--axes", help="comma-separated axis names (rows, scale, ...) or verb:axis keys")
     ap.add_argument("--reps", type=int, default=10, help="timed reps per point (default 10)")
@@ -171,10 +169,10 @@ def main(argv=None):
                     help="skip points already measured (status ok) in these stats files; repeatable")
     ap.add_argument("--stock-rows", type=int, default=STOCK_ROWS, help=argparse.SUPPRESS)
     ap.add_argument("--no-progress", action="store_true", help=argparse.SUPPRESS)
-    args = ap.parse_args(argv)
+    return ap
 
-    backend = tp.Backend.Value(args.backend.upper())
-    backend_name = tp.Backend.Name(backend)
+
+def _select_points(args: argparse.Namespace) -> tuple[list, set[str]]:
     verbs = args.verbs.split(",") if args.verbs else None
     axes = args.axes.split(",") if args.axes else None
     for v in verbs or []:
@@ -190,11 +188,26 @@ def main(argv=None):
         print(f"Skipping {len(done)} points already measured")
         if not points:
             print("Nothing left to measure at this scale")
-            return
+            return points, done
     if not points:
         print("Error: no points selected for this scale, verbs and axes")
         sys.exit(1)
-    run_id = f"micro_verbs_{args.backend}_w{args.scale}{args.suffix}"
+    return points, done
+
+
+def run(argv: list[str], *, target: PreparedTarget, system_name: str) -> dict | None:
+    """Run the grid on ``target`` and return the stats written to --outdir."""
+    args = _argument_parser().parse_args(argv)
+    points, done = _select_points(args)
+    if not points:
+        return None
+    return _run(args, points, done, target=target, system_name=system_name)
+
+
+def _run(args: argparse.Namespace, points: list, done: set[str], *,
+         target: PreparedTarget, system_name: str) -> dict:
+    backend_name = system_name
+    run_id = f"micro_verbs_{backend_name.lower()}_w{args.scale}{args.suffix}"
     os.makedirs(args.outdir, exist_ok=True)
     stats_path = os.path.join(args.outdir, f"{run_id}_stats.json")
     log = print
@@ -202,18 +215,25 @@ def main(argv=None):
         f"Points: {len(points)} ({args.warmup} warm-up + {args.reps} timed reps each)"
         + (f"\nNative-only mode" if native_only() else ""))
 
-    database_setup = tp.DatabaseSetup(db_name=args.db_name, cleanup=True)
-    database_setup.generated.SetInParent()
-    backend_mgr = BackendManager(BackendSetup(backend=backend, database_setup=database_setup))
-    backend_info = backend_mgr.setup()
-    spine = backend_info.default_branch_name
+    spine = target.root_ref
     collector = rc.ResultCollector(run_id=run_id, output_dir=args.outdir, spill_rows=200_000)
     collector.set_context(table_name="micro_verbs", table_schema=f"w{args.scale}", initial_db_size=0,
                           seed=args.seed)
     rc.set_current_thread_id(1)
 
+    suite_index = 0
+    suite_index_lock = threading.Lock()
+
     def new_suite():
-        return create_db_tools(backend, backend_info, args.db_name, collector, measure_storage=False)
+        nonlocal suite_index
+        with suite_index_lock:
+            worker_index = suite_index
+            suite_index += 1
+        return target.open_suite(SuiteRequest(
+            result_collector=collector,
+            initial_ref=spine,
+            worker_index=worker_index,
+        ))
 
     def close(suite):
         try:
@@ -224,7 +244,7 @@ def main(argv=None):
     stats = {"run_id": run_id, "backend": backend_name, "scale": args.scale, "seed": args.seed,
              "reps": args.reps, "warmup": args.warmup, "storage_reps": args.storage_reps,
              "follow_up_rows": FOLLOW_UP_ROWS, "base": BASE, "native_only": native_only(),
-             "implementation": _implementation_for(backend), "setup": {}, "points": [], "status": "running"}
+             "implementation": implementation_report(target.suite_type), "setup": {}, "points": [], "status": "running"}
 
     def save():
         with open(stats_path, "w") as f:
@@ -232,20 +252,22 @@ def main(argv=None):
 
     # -- data: schema and CH-benCHmark at W, committed as the base --------
     suite = new_suite()
-    t0 = time.time()
-    schema = tp.SchemaConfig(base=tp.BaseSchema.CH_BENCH, scale_factor=args.scale)
-    sch = mschema.apply_schema(suite, spine, schema, "micro_verbs", log=log)
-    scale = CHScale.from_config(schema)
-    log(f"Seeding CH-benCHmark at W={scale.warehouses}...")
-    counts = seed_ch(suite, spine, scale, seed=args.seed, batch_rows=500, log=log)
-    base = suite.commit(spine, "base", timed=False)
-    stats["setup"] = {"schema_statements": sch["statements"], "schema_failed": sch["failed"],
-                      "ch_rows": counts, "base_commit": base.status_name, "setup_sec": round(time.time() - t0, 1)}
-    _flush(suite, backend, spine)
-    stats["setup"]["storage_bytes"] = suite._safe_storage()
-    log(f"Setup: {sum(counts.values()):,} rows in {stats['setup']['setup_sec']}s, "
-        f"storage {_fmt_bytes(stats['setup']['storage_bytes'])}")
-    close(suite)
+    try:
+        t0 = time.time()
+        schema = tp.SchemaConfig(base=tp.BaseSchema.CH_BENCH, scale_factor=args.scale)
+        sch = mschema.apply_schema(suite, spine, schema, "micro_verbs", log=log)
+        scale = CHScale.from_config(schema)
+        log(f"Seeding CH-benCHmark at W={scale.warehouses}...")
+        counts = seed_ch(suite, spine, scale, seed=args.seed, batch_rows=500, log=log)
+        base = suite.commit(spine, "base", timed=False)
+        stats["setup"] = {"schema_statements": sch["statements"], "schema_failed": sch["failed"],
+                          "ch_rows": counts, "base_commit": base.status_name, "setup_sec": round(time.time() - t0, 1)}
+        _flush(suite, spine)
+        stats["setup"]["storage_bytes"] = suite._safe_storage()
+        log(f"Setup: {sum(counts.values()):,} rows in {stats['setup']['setup_sec']}s, "
+            f"storage {_fmt_bytes(stats['setup']['storage_bytes'])}")
+    finally:
+        close(suite)
     save()
 
     todo = [("control", CONTROL, dict(BASE, scale=args.scale), CONTROL_REPS)] \
@@ -257,9 +279,10 @@ def main(argv=None):
             suite = new_suite()
             point_branch = f"p{idx}"
             t0 = time.time()
+            res = None
             try:
                 fork(suite, point_branch, spine)
-                res = run_point(pid, verb, params, suite, backend, spine, point_branch, reps=reps,
+                res = run_point(pid, verb, params, suite, spine, point_branch, reps=reps,
                                 warmup=args.warmup, storage_reps=args.storage_reps,
                                 stock_rows=args.stock_rows, log=log, new_suite=new_suite)
             except Exception as e:
@@ -268,11 +291,14 @@ def main(argv=None):
                        "errors": [f"{type(e).__name__}: {e}"[:300]], "reps": [], "latency": {},
                        "storage": {}, "deferred": {}, "failed": 0}
             finally:
-                drop(suite, point_branch)
-                if not args.no_gc:
-                    gc = suite.gc()
-                    res["gc"] = {"status": gc.status_name, "latency_sec": round(gc.latency, 2)}
-                close(suite)
+                try:
+                    drop(suite, point_branch)
+                    if not args.no_gc:
+                        gc = suite.gc()
+                        if res is not None:
+                            res["gc"] = {"status": gc.status_name, "latency_sec": round(gc.latency, 2)}
+                finally:
+                    close(suite)
             res["elapsed_sec"] = round(time.time() - t0, 1)
             stats["points"].append(res)
             save()
@@ -291,15 +317,50 @@ def main(argv=None):
     except KeyboardInterrupt:
         status = "interrupted"
         log("\nInterrupted: writing what was measured...")
+    except BaseException:
+        status = "aborted"
+        raise
     finally:
         stats["status"] = status
-        try:
-            backend_mgr.cleanup()
-        except Exception as e:
-            log(f"Cleanup failed: {e}")
         save()
         collector.write_to_parquet(append=False)
         log(f"Stats written to {stats_path}")
+    return stats
+
+
+def main(argv: list[str] | None = None) -> dict | None:
+    """Prepare a generated database, run the grid, and remove the database."""
+    parser = _argument_parser()
+    args = parser.parse_args(argv)
+    if not args.backend:
+        parser.error("--backend is required")
+    points, done = _select_points(args)
+    if not points:
+        return None
+    setup = tp.DatabaseSetup(db_name=args.db_name, cleanup=True)
+    setup.generated.SetInParent()
+    completed = False
+    run_failure = None
+    try:
+        with prepared_database(args.backend.lower(), setup) as target:
+            try:
+                result = _run(args, points, done, target=target, system_name=args.backend.upper())
+            except BaseException as error:
+                run_failure = (error, error.__traceback__)
+                raise
+            completed = True
+    except BaseException as error:
+        if run_failure is not None:
+            failure, traceback = run_failure
+            if error is not failure:
+                if not isinstance(error, Exception):
+                    raise
+                print(f"Cleanup failed: {error}")
+            raise failure.with_traceback(traceback)
+        if not completed or not isinstance(error, Exception):
+            raise
+        print(f"Cleanup failed: {error}")
+    return result
 
 
 if __name__ == "__main__":

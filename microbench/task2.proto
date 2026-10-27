@@ -2,7 +2,8 @@ syntax = "proto3";
 
 package microbench2;
 
-// Backend database systems
+// Built-in integrations selectable by the CLI. Embedding applications can
+// supply a PreparedTarget instead. New integrations also work via --backend.
 enum Backend {
   NEON = 0;
   DOLT = 1;
@@ -66,7 +67,7 @@ enum BranchShape {
   BUSHY = 2;    // Random parent selection
 }
 
-// Existing database reference (for reusing pre-created databases)
+// Attach to an existing database instead of creating a new one.
 message ExistingDatabase {
   string branch_id = 1;
   string neon_project_id = 2;
@@ -77,7 +78,7 @@ message SqlDump {
   string sql_dump_path = 1;
 }
 
-// Database setup configuration
+// The CLI owns database setup and cleanup. Prepared-target execution does not.
 message DatabaseSetup {
   string db_name = 1;
   bool cleanup = 2;  // Whether to cleanup after benchmark
@@ -149,7 +150,7 @@ message OperationBenchmark {
 // Main task configuration
 message TaskConfig {
   string run_id = 1;
-  Backend backend = 2;
+  optional Backend backend = 2;  // Presence prevents an implicit NEON default.
   string table_name = 3;
   DatabaseSetup database_setup = 4;
 

@@ -185,7 +185,7 @@ class DevAgentScenario(Scenario):
         res = ctx.branch(suite, branch, ctx.spine, label="dev_branch")
         if not res.ok:
             ctx.note(f"dev branch {branch}: {res.status_name} {res.error}")
-            ctx.tick(p.dev_phase_steps + p.review_phase_steps)
+            ctx.tick(p.dev_phase_steps + p.review_phase_steps, outcome="failed")
             return None
         # The branch's feature column. An agent looks before it adds: a fork
         # taken after the spine's conflicting migration already has c_tier

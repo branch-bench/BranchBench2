@@ -913,6 +913,19 @@ class DBToolSuite(ABC):
         return OpResult(op="gc", status=status, latency=time.perf_counter() - start,
                         error=error)
 
+    def flush(self, ref: RefLike = None) -> None:
+        """Make durable storage visible before a storage measurement: a
+        CHECKPOINT on ``ref`` (the current ref by default) where the engine
+        speaks Postgres (FAILED and ignored elsewhere), the adapter's own
+        hook, then sync."""
+        self.exec(["CHECKPOINT"], refs=None if ref is None else [ref], timed=False)
+        self._flush_impl()
+        os.sync()
+
+    def _flush_impl(self) -> None:
+        """Hook for adapters whose engine needs its own checkpoint or gc
+        before storage is measured."""
+
     # ------------------------------------------------------------------
     # exec
     # ------------------------------------------------------------------

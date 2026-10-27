@@ -113,7 +113,7 @@ class OpsAgentScenario(Scenario):
                               "S5.4 dropped column's values restored by the reset"):
                         inv.not_applicable(n + tag, why)
                     ctx.note(f"incident {inc} not run: {why}")
-                    ctx.tick(n_commits + per_inc + 1)
+                    ctx.tick(n_commits + per_inc + 1, outcome="skipped")
                     k += n_commits
                     next_commit_at += every * n_commits
                     continue
@@ -368,7 +368,7 @@ class OpsAgentScenario(Scenario):
         res = ctx.branch(suite, branch, ref, label="investigation_branch")
         if not res.ok:
             ctx.note(f"investigation branch {branch}: {res.status_name} {res.error}")
-            ctx.tick()
+            ctx.tick(outcome="failed")
             return None
 
         # Sized by DataOps like S1 and S2: statements_per_step split by

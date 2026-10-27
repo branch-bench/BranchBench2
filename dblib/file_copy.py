@@ -41,7 +41,7 @@ new connections to the template back until the copy is done. The wait is
 part of the clone's latency, as it would be in production.
 
 Environment: ``PGSQL_USER``, ``PGSQL_PASSWORD``, ``PGSQL_HOST``,
-``PGSQL_PORT`` (also read from ``.env``), ``PGSQL_DATA_DIR`` (the mount
+``PGSQL_PORT``, ``PGSQL_DATA_DIR`` (the mount
 point of a volume dedicated to the server: storage is then the volume's
 usage minus WAL, which is right under copy-on-write; without it, storage
 is the sum of pg_database_size over the run's databases, which counts
@@ -59,15 +59,12 @@ import time
 import psycopg2
 import psycopg2.errors
 import psycopg2.extensions
-from dotenv import load_dotenv
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 from dblib.db_api import DBToolSuite, OperationCancelled, Ref
 from dblib.pg_merge import META_PREFIX, PgMergeMixin, _q, empty_diff
 import dblib.result_collector as rc
-import dblib.util as dbutil
-
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+from dblib import util as dbutil
 
 PGSQL_USER = os.environ.get("PGSQL_USER", "elaineang")
 PGSQL_PASSWORD = os.environ.get("PGSQL_PASSWORD", "")

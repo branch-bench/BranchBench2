@@ -10,7 +10,6 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
-from dotenv import load_dotenv
 import psycopg2
 import requests
 
@@ -18,7 +17,6 @@ from psycopg2.extensions import connection as _pgconn
 from dblib.db_api import DBToolSuite, Ref
 import dblib.result_collector as rc
 
-load_dotenv()
 API_KEY = os.environ.get("XATA_API_KEY", "")
 
 # Everything runs in one pre-created organization.
@@ -58,19 +56,23 @@ class XataToolSuite(DBToolSuite):
                 "replicas": 0,
             },
         }
-        default_branch = cls._request("POST", endpoint, json=branch_payload)
-        conn_string = cls._poll_branch_active(
-            project_details["id"],
-            default_branch["id"],
-            initial_conn_string=default_branch.get("connectionString"),
-            initial_status_type=(default_branch.get("status") or {}).get("statusType", ""),
-        )
-        return (
-            project_details["id"],
-            default_branch["id"],
-            default_branch["name"],
-            cls.add_db_name_to_connection_string(conn_string, "postgres"),
-        )
+        try:
+            default_branch = cls._request("POST", endpoint, json=branch_payload)
+            conn_string = cls._poll_branch_active(
+                project_details["id"],
+                default_branch["id"],
+                initial_conn_string=default_branch.get("connectionString"),
+                initial_status_type=(default_branch.get("status") or {}).get("statusType", ""),
+            )
+            return (
+                project_details["id"],
+                default_branch["id"],
+                default_branch["name"],
+                cls.add_db_name_to_connection_string(conn_string, "postgres"),
+            )
+        except BaseException:
+            cls.delete_project(project_details["id"])
+            raise
 
     @classmethod
     def delete_project(cls, project_id: str) -> None:

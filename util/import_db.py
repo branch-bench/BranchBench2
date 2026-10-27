@@ -86,7 +86,7 @@ def main():
     Standalone script entry point for loading SQL files into PostgreSQL.
 
     Usage:
-        python -m dblib.util <sql_file> --host <host> --port <port> --user <user> --password <password> --database <db_name>
+        python -m util.import_db <sql_file> --host <host> --port <port> --user <user> --password <password> --database <db_name>
     """
     parser = argparse.ArgumentParser(
         description="Load a SQL file into a PostgreSQL database"

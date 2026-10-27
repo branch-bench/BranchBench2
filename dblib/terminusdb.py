@@ -520,7 +520,6 @@ def insert_rows(db_name: str, table: str, columns: list, rows) -> int:
     finally:
         client.close()
 
-
 # ----------------------------------------------------------------------------
 # WOQL (JSON-LD) building blocks
 # ----------------------------------------------------------------------------

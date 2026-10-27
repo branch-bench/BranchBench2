@@ -79,7 +79,7 @@ def _run(suite, verb, params, idx=0, reps=2):
     and dropped afterwards."""
     fork(suite, f"p{idx}", "main")
     try:
-        return run_point(f"{verb.name}:test", verb, params, suite, tp.Backend.DOLT, "main", f"p{idx}",
+        return run_point(f"{verb.name}:test", verb, params, suite, "main", f"p{idx}",
                          reps=reps, warmup=1, storage_reps=0, stock_rows=STOCK_ROWS, log=lambda m: None)
     finally:
         drop(suite, f"p{idx}")

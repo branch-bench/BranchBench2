@@ -1,12 +1,16 @@
-"""Neon backend against the real service (skipped without NEON_API_KEY_ORG).
-Creates one scratch project, exercises every verb, deletes the project."""
+"""Neon backend against the real service. Billable: runs only with
+DBFORK_LIVE_TESTS=1 and NEON_API_KEY_ORG set. Creates one scratch project,
+exercises every verb, deletes the project."""
+
+import os
 
 import pytest
 
 from dblib import result_collector as rc
-from dblib import neon
+from dblib import neon as neon
 
-pytestmark = pytest.mark.skipif(not neon.API_KEY, reason="no Neon API key")
+pytestmark = pytest.mark.skipif(os.environ.get("DBFORK_LIVE_TESTS") != "1" or not neon.API_KEY,
+                                reason="billable: needs DBFORK_LIVE_TESTS=1 and a Neon API key")
 
 DB = "bb_test"
 

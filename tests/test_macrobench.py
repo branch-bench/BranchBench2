@@ -270,9 +270,10 @@ def test_run_transaction_retries_then_raises(suite):
 
 
 def test_intensity_caps_rl_env_group_size():
+    from importlib.resources import files
     from google.protobuf import text_format
     cfg = tp.MacroBenchConfig()
-    text_format.Parse(open("macrobench/configs/rl_env.textproto").read(), cfg)
+    text_format.Parse((files("macrobench") / "configs" / "rl_env.textproto").read_text(), cfg)
     cfg.workload.branch_intensity = 5.0
     apply_intensity(cfg.workload)
     p = cfg.workload.rl_env

@@ -64,7 +64,6 @@ from urllib.parse import urlparse
 
 import psycopg2
 import requests
-from dotenv import load_dotenv
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 from dblib.db_api import DBToolSuite, Ref, Session
@@ -72,7 +71,6 @@ from dblib.pg_merge import META_PREFIX, PgMergeMixin, _q, empty_diff
 from dblib import result_pb2 as rslt
 import dblib.result_collector as rc
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 API_KEY = os.environ.get("NEON_API_KEY_ORG", "")
 NEON_API_BASE_URL = "https://console.neon.tech/api/v2/"
 NEON_REGION = os.environ.get("NEON_REGION", "aws-us-east-1")
@@ -271,7 +269,11 @@ def create_project(project_name: str) -> dict:
         }
     }
     resp = api_request("POST", "projects", json=body)
-    wait_operations(resp["project"]["id"], resp.get("operations"))
+    try:
+        wait_operations(resp["project"]["id"], resp.get("operations"))
+    except BaseException:
+        api_request("DELETE", f"projects/{resp['project']['id']}")
+        raise
     return resp
 
 

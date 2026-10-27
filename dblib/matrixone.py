@@ -101,9 +101,8 @@ import pymysql
 from pymysql.constants import CLIENT
 
 from dblib.db_api import DBToolSuite, Ref, native_only
-from dblib import mysql_common
+from dblib import util as dbutil, mysql_common
 import dblib.result_collector as rc
-import dblib.util as dbutil
 
 MO_USER = os.environ.get("MO_USER", "root")
 MO_PASSWORD = os.environ.get("MO_PASSWORD", "111")
@@ -383,6 +382,9 @@ class MatrixOneToolSuite(DBToolSuite):
     # once; the statements below are safe to retry.
     _ER_DEADLOCK = 20701
     _DDL_RETRIES = 5
+
+    def _flush_impl(self) -> None:
+        self._gc_impl()
 
     def _execute_ddl(self, sql: str) -> None:
         for attempt in range(self._DDL_RETRIES):

@@ -8,13 +8,13 @@ is reported on its own and does not hide the rest.
 """
 
 import re
+from importlib.resources import files
 from pathlib import Path
 
 from macrobench import task_pb2 as tp
 
 SCHEMA_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCHEMA_DIR.parent.parent
-CH_SCHEMA_PATH = REPO_ROOT / "db_setup" / "ch_benchmark_schema.sql"
+CH_SCHEMA_PATH = files("db_setup") / "ch_benchmark_schema.sql"
 
 EXTENSION_FILES = {
     tp.SchemaExtension.RL_ENV_EXT: "rl_env.sql",
@@ -85,10 +85,7 @@ def ddl_statements(schema: tp.SchemaConfig, scenario_key: str) -> list:
         path = SCHEMA_DIR / EXTENSION_FILES[ext]
         stmts.extend(split_statements(path.read_text()))
     if schema.custom_ddl_path:
-        path = Path(schema.custom_ddl_path)
-        if not path.is_absolute():
-            path = REPO_ROOT / path
-        stmts.extend(split_statements(path.read_text()))
+        stmts.extend(split_statements(Path(schema.custom_ddl_path).read_text()))
     return stmts
 
 

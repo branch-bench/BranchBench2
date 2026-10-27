@@ -87,6 +87,41 @@ class InvariantRecorder:
         }
 
 
+@dataclass
+class WorkSummary:
+    """Thread-safe logical work outcomes for one scenario run."""
+
+    expected: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    worker_errors: list = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def record(self, outcome: str, count: int = 1) -> None:
+        if outcome not in ("succeeded", "failed", "skipped"):
+            raise ValueError(f"unknown work outcome: {outcome}")
+        with self._lock:
+            setattr(self, outcome, getattr(self, outcome) + count)
+
+    def record_worker_error(self, worker: int, item, error: Exception) -> None:
+        with self._lock:
+            self.worker_errors.append({
+                "worker": int(worker),
+                "item": str(item)[:120],
+                "error": f"{type(error).__name__}: {str(error)[:240]}",
+            })
+
+    def summary(self) -> dict:
+        with self._lock:
+            return {
+                "expected": int(self.expected),
+                "succeeded": int(self.succeeded),
+                "failed": int(self.failed),
+                "skipped": int(self.skipped),
+            }
+
+
 def is_retryable_error(msg: str) -> bool:
     """Errors worth retrying after a wait: Neon/Xata rate- and
     resource-limit errors, a connection the server dropped (a compute
@@ -120,6 +155,7 @@ class ScenarioContext:
     log: Callable[[str], None] = print
     metrics: dict = field(default_factory=dict)
     worker_conns: dict = field(default_factory=dict)
+    work: WorkSummary = field(default_factory=WorkSummary)
     _slots: Optional[threading.BoundedSemaphore] = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -184,15 +220,19 @@ class ScenarioContext:
                 raise UnsupportedOperationAbort(self.unsupported_abort)
             raise ScenarioStopped()
 
-    def tick(self, n: int = 1) -> None:
+    def tick(self, n: int = 1, outcome: str = "succeeded") -> None:
+        """Account ``n`` units of logical work as ``outcome`` (succeeded,
+        failed or skipped) and advance the progress bar."""
+        self.work.record(outcome, n)
         if self.progress is not None:
             self.progress.update(n)
 
     def note(self, msg: str) -> None:
+        text = str(msg or "")
         if self.progress is not None:
-            self.progress.write(msg)
+            self.progress.write(text)
         else:
-            self.log(msg)
+            self.log(text)
 
     def add_metric(self, key: str, value) -> None:
         with self._lock:
@@ -234,68 +274,70 @@ class ScenarioContext:
 
     def run_workers(self, items: list, fn: Callable, threads: int = None,
                     thread_base: int = 1) -> list:
-        """Run ``fn(worker, item)`` over ``items`` on a pool of threads, each
+        """Run ``fn(worker, item)`` over ``items`` on ``threads`` workers, each
         with its own suite (``worker.suite``), rng (``worker.rng``) and id.
-        Returns the list of return values (or exceptions) in item order."""
+        Returns the list of return values (or exceptions) in item order.
+        A worker opens its suite on its first item and closes it on its own
+        thread once the items run out, whatever the items did, so every
+        suite this call opened is closed exactly once before it returns.
+        The scenario accounts its own units through tick(); a worker that
+        raises unexpectedly is recorded as a worker error only. A failed
+        check under fail_fast stops the other workers and is raised here
+        once every worker suite is closed."""
         threads = threads or self.worker_threads
         threads = max(1, min(threads, len(items) or 1))
         results = [None] * len(items)
-        local = threading.local()
+        pending = list(enumerate(items))
 
-        def init_worker():
-            idx = getattr(local, "idx", None)
-            if idx is None:
-                with self._lock:
-                    idx = self._worker_counter = getattr(self, "_worker_counter", 0) + 1
-                local.idx = idx
-                rc.set_current_thread_id(thread_base + idx)
-                local.worker = Worker(self, thread_base + idx, self.new_suite(),
-                                      self.worker_rng(idx))
-            return local.worker
+        def next_item():
+            with self._lock:
+                return pending.pop(0) if pending else None
 
-        def task(i, item):
-            w = init_worker()
+        def run_item(w, i, item):
             try:
                 results[i] = fn(w, item)
             except ScenarioStopped as e:
                 results[i] = e
+            except InvariantFailed as e:
+                results[i] = e
+                self.cancel_all(f"invariant failed: {e}")
             except Exception as e:
                 results[i] = e
+                self.work.record_worker_error(w.id, item, e)
                 self.note(f"[W{w.id}] {type(e).__name__}: {e}")
-            return i
+
+        def work():
+            w = None
+            try:
+                while (pair := next_item()) is not None:
+                    if w is None:
+                        with self._lock:
+                            idx = self._worker_counter = getattr(self, "_worker_counter", 0) + 1
+                        rc.set_current_thread_id(thread_base + idx)
+                        w = Worker(self, thread_base + idx, self.new_suite(), self.worker_rng(idx))
+                    run_item(w, *pair)
+            finally:
+                if w is not None:
+                    self.close_suite(w.suite)
 
         if threads == 1:
             # Same thread as the caller keeps suites/thread ids simple.
-            w = init_worker()
-            for i, item in enumerate(items):
-                try:
-                    results[i] = fn(w, item)
-                except Exception as e:
-                    results[i] = e
-                    if not isinstance(e, ScenarioStopped):
-                        self.note(f"[W{w.id}] {type(e).__name__}: {e}")
-            self.close_suite(w.suite)
-            if self.unsupported_abort:
-                raise UnsupportedOperationAbort(self.unsupported_abort)
-            return results
+            work()
+        else:
+            with ThreadPoolExecutor(max_workers=threads) as pool:
+                for f in [pool.submit(work) for _ in range(threads)]:
+                    f.result()
+        return self._pool_done(results)
 
-        workers_made = []
-        with ThreadPoolExecutor(max_workers=threads) as pool:
-            futures = [pool.submit(task, i, item) for i, item in enumerate(items)]
-            for f in futures:
-                f.result()
-            # Close suites on their own threads.
-            def closer():
-                w = getattr(local, "worker", None)
-                if w is not None:
-                    workers_made.append(w)
-                    self.close_suite(w.suite)
-            for _ in range(threads):
-                pool.submit(closer).result()
-        # A worker's unsupported verb ended the run: surface it on the
-        # caller's thread too, so the scenario does not go on without it.
+    def _pool_done(self, results: list) -> list:
+        """Every worker suite is closed. An unsupported verb or a failed
+        check seen by a worker ends the run on the caller's thread too, so
+        the scenario does not go on without it."""
         if self.unsupported_abort:
             raise UnsupportedOperationAbort(self.unsupported_abort)
+        for r in results:
+            if isinstance(r, InvariantFailed):
+                raise r
         return results
 
     # -- branch helpers ----------------------------------------------------

@@ -1,16 +1,25 @@
-"""Macrobenchmark runner: one scenario (S1-S6) over one backend.
+"""Macrobenchmark runner: one scenario (S1-S6) over one prepared target.
 
-Usage:
-    python -m macrobench.runner --config macrobench/configs/rl_env_mini.textproto
+    from macrobench import runner
+    runner.run(["--config", "rl_env_mini.textproto", "--outdir", out],
+                target=prepared_target, system_name="Doltgres")
 
-The runner sets the backend up, creates the schema and seed data with the
-generators (unless the config reuses an existing database or loads a
-dump), starts the optional TPC-C spine load, runs the scenario, and writes
-the operation rows to parquet plus an e2e stats JSON with the support
-summary, the invariant results and the scenario's own metrics.
+The embedding application provisions the database and passes it as a
+dblib.target.PreparedTarget. The runner creates the schema and seed data
+with the generators, starts the optional TPC-C spine load, runs the
+scenario, and writes the operation rows to parquet plus an e2e stats JSON
+with the support summary, the invariant results, the logical work counters
+and the scenario's own metrics. Deleting the database is the embedding
+application's job, so the last storage point is taken after gc. The CLI
+prepares its own database from backend and database_setup in the config.
+Existing databases skip schema and seed initialization. SQL dumps retain
+the original behavior: load the dump, then apply schema and seed data.
 """
 
+from __future__ import annotations
+
 import argparse
+from collections.abc import Callable
 import json
 import os
 import signal
@@ -23,7 +32,8 @@ from google.protobuf import text_format
 from google.protobuf.json_format import MessageToDict
 
 from dblib import result_collector as rc
-from dblib.neon import NeonToolSuite
+from dblib.connector import prepare_database
+from dblib.target import PreparedTarget, SuiteRequest
 from macrobench import schema as mschema
 from macrobench import task_pb2 as tp
 from macrobench.datagen.ch import CHScale, seed_ch
@@ -38,12 +48,7 @@ from macrobench.scenarios import (  # noqa: F401 (registers the scenarios)
 )
 from macrobench.tpcc import SpineLoad
 from dblib.db_api import native_only
-from microbench.runner2 import (
-    BackendManager,
-    BackendSetup,
-    SharedProgress,
-    create_db_tools,
-)
+from microbench.runner2 import SharedProgress
 
 
 def load_config(path: str) -> tp.MacroBenchConfig:
@@ -52,8 +57,6 @@ def load_config(path: str) -> tp.MacroBenchConfig:
         text_format.Parse(f.read(), config)
     if not config.run_id:
         raise ValueError("run_id is required")
-    if not config.database_setup.db_name:
-        raise ValueError("database_setup.db_name is required")
     if config.workload.WhichOneof("scenario") is None:
         raise ValueError("workload must set one scenario (rl_env, context_mgmt, ...)")
     if (config.workload.HasField("multi_agent")
@@ -69,9 +72,7 @@ def load_config(path: str) -> tp.MacroBenchConfig:
 
 
 def _flush_to_disk(suite):
-    """CHECKPOINT (Postgres; FAILED and ignored elsewhere) then sync."""
-    suite.exec(["CHECKPOINT"], timed=False)
-    os.sync()
+    suite.flush()
 
 
 DEFAULT_STORAGE_SAMPLE_SEC = 5.0
@@ -144,74 +145,12 @@ def storage_sample_interval(config, cli_value) -> float:
     return max(0.0, v)
 
 
-def _capabilities_for(backend) -> dict:
-    from dblib.dolt import DoltToolSuite
-    from dblib.dolt_mysql import DoltMySQLToolSuite
-    from dblib.seekdb import SeekDBToolSuite
-    from dblib.matrixone import MatrixOneToolSuite
-    from dblib.bauplan import BauplanToolSuite
-    from dblib.xata import XataToolSuite
-    from dblib.file_copy import FileCopyToolSuite
-    from dblib.chronos import ChronosToolSuite
-
-    table = {
-        tp.Backend.DOLT: DoltToolSuite,
-        tp.Backend.DOLT_MYSQL: DoltMySQLToolSuite,
-        tp.Backend.SEEKDB: SeekDBToolSuite,
-        tp.Backend.MATRIXONE: MatrixOneToolSuite,
-        tp.Backend.BAUPLAN: BauplanToolSuite,
-        tp.Backend.NEON: NeonToolSuite,
-        tp.Backend.XATA: XataToolSuite,
-        tp.Backend.FILE_COPY: FileCopyToolSuite,
-        tp.Backend.CHRONOS: ChronosToolSuite,
+def implementation_report(suite_type) -> dict:
+    """How a suite realises each verb (native, simulated or unsupported)."""
+    return {
+        "verbs": suite_type.implementation(),
+        "notes": dict(suite_type.IMPLEMENTATION_NOTES),
     }
-    cls = table.get(backend)
-    return cls.capabilities() if cls else {}
-
-
-def _implementation_for(backend) -> dict:
-    """How the backend realises each verb (native/simulated; unsupported in native-only mode)."""
-    from dblib.dolt import DoltToolSuite
-    from dblib.dolt_mysql import DoltMySQLToolSuite
-    from dblib.seekdb import SeekDBToolSuite
-    from dblib.matrixone import MatrixOneToolSuite
-    from dblib.bauplan import BauplanToolSuite
-    from dblib.xata import XataToolSuite
-    from dblib.file_copy import FileCopyToolSuite
-    from dblib.chronos import ChronosToolSuite
-
-    table = {
-        tp.Backend.DOLT: DoltToolSuite,
-        tp.Backend.DOLT_MYSQL: DoltMySQLToolSuite,
-        tp.Backend.SEEKDB: SeekDBToolSuite,
-        tp.Backend.MATRIXONE: MatrixOneToolSuite,
-        tp.Backend.BAUPLAN: BauplanToolSuite,
-        tp.Backend.NEON: NeonToolSuite,
-        tp.Backend.XATA: XataToolSuite,
-        tp.Backend.FILE_COPY: FileCopyToolSuite,
-        tp.Backend.CHRONOS: ChronosToolSuite,
-    }
-    cls = table.get(backend)
-    if not cls:
-        return {}
-    return {"verbs": cls.implementation(), "notes": dict(cls.IMPLEMENTATION_NOTES)}
-
-
-def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
-    """Wait for Neon consumption metrics, retrying once per minute."""
-    print(f"Waiting {wait_min} min for Neon consumption metrics ({label})...", flush=True)
-    for elapsed_min in range(wait_min):
-        time.sleep(60)
-        if (elapsed_min + 1) % 3 == 0 or elapsed_min + 1 == wait_min:
-            print(f"  {elapsed_min + 1}/{wait_min} min elapsed...", flush=True)
-    for attempt in range(max_retries):
-        result = NeonToolSuite.get_consumption_metrics(project_id)
-        if result and result.get("all_metrics"):
-            return result
-        if attempt < max_retries - 1:
-            time.sleep(60)
-    print(f"  WARNING: No Neon consumption metrics for {label}", flush=True)
-    return None
 
 
 def setup_data(config, scenario, suite, log=print) -> dict:
@@ -249,10 +188,12 @@ def setup_data(config, scenario, suite, log=print) -> dict:
     return stats
 
 
-def main(argv=None):
+def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a macrobenchmark scenario.")
     parser.add_argument("--config", required=True, help="MacroBenchConfig textproto")
     parser.add_argument("--outdir", default="/tmp/run_stats", help="parquet/json output dir")
+    parser.add_argument("--backend", help="Database integration (overrides the config backend)")
+    parser.add_argument("--db-name", help="Database name (overrides database_setup.db_name)")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--measure-storage", action="store_true",
                         help="Measure disk_size_before/after around each timed operation.")
@@ -265,23 +206,33 @@ def main(argv=None):
     parser.add_argument("--storage-sample-interval", type=float, default=None,
                         help="Seconds between background storage samples during the "
                              f"scenario (default {DEFAULT_STORAGE_SAMPLE_SEC:g}; 0 = off).")
-    args = parser.parse_args(argv)
+    return parser
 
+
+def _load_args(argv: list[str] | None) -> tuple[argparse.Namespace, tp.MacroBenchConfig]:
+    parser = _argument_parser()
+    args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
-    except FileNotFoundError:
-        print(f"Error: config file not found: {args.config}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error parsing config: {e}")
-        sys.exit(1)
+    except (OSError, text_format.ParseError, ValueError) as error:
+        parser.error(str(error))
     if args.measure_storage:
         config.measure_storage = True
+    return args, config
 
+
+def run(argv: list[str], *, target: PreparedTarget, system_name: str) -> dict:
+    """Run one scenario on ``target`` and return its e2e stats."""
+    args, config = _load_args(argv)
+    return _run(args, config, target=target, system_name=system_name)
+
+
+def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
+         target: PreparedTarget, system_name: str,
+         _finalize_result: Callable[[dict, object], None] | None = None) -> dict:
     scenario_key = config.workload.WhichOneof("scenario")
-    backend_name = tp.Backend.Name(config.backend)
     print(f"Run ID: {config.run_id}")
-    print(f"Backend: {backend_name}")
+    print(f"System: {system_name}")
     print(f"Scenario: {scenario_key}")
     print(f"Schema: base={tp.BaseSchema.Name(config.schema.base)} "
           f"W={config.schema.scale_factor or 1}")
@@ -306,43 +257,49 @@ def main(argv=None):
         print(f"Spine-only baseline: {config.spine_only_sec}s, {clients} spine client(s), no workflow")
     print(f"Storage sampling: every {sample_sec:g}s" if sample_sec > 0 else "Storage sampling: off")
 
-    backend_mgr = BackendManager(
-        BackendSetup(backend=config.backend, database_setup=config.database_setup)
-    )
-    backend_info = backend_mgr.setup()
-
     # A long run with a spine load emits millions of rows; spill them to
     # the parquet file as they come so the run's memory stays bounded.
     collector = rc.ResultCollector(run_id=config.run_id, output_dir=args.outdir,
                                    spill_rows=int(os.environ.get("MACRO_SPILL_ROWS", "200000")))
-    # Per-op storage is too expensive on Neon (pg_database_size per branch)
-    # and Bauplan (table metadata calls per branch).
-    measure_storage = config.measure_storage and config.backend not in (
-        tp.Backend.NEON, tp.Backend.BAUPLAN)
-    db_name = config.database_setup.db_name
+    measure_storage = config.measure_storage
+    suite_counter = 0
+    suite_counter_lock = threading.Lock()
 
     def suite_factory():
-        return create_db_tools(config.backend, backend_info, db_name, collector,
-                               measure_storage=measure_storage)
+        nonlocal suite_counter
+        with suite_counter_lock:
+            worker_index = suite_counter
+            suite_counter += 1
+        return target.open_suite(SuiteRequest(
+            result_collector=collector,
+            initial_ref=target.root_ref,
+            worker_index=worker_index,
+            measure_storage=measure_storage,
+        ))
 
     invariants = InvariantRecorder(enabled=not config.invariants.disabled,
                                    fail_fast=config.invariants.fail_fast)
     ctx = ScenarioContext(config=config, suite_factory=suite_factory,
-                          collector=collector, spine=backend_info.default_branch_name,
+                          collector=collector, spine=target.root_ref,
                           invariants=invariants, log=print)
     scenario = create_scenario(ctx)
     scenario.validate()
+    ctx.work.expected = int(scenario.total_units())
     collector.set_context(table_name="macrobench", table_schema=scenario.key,
                           initial_db_size=0, seed=ctx.seed)
 
     setup_suite = ctx.new_suite()
     seed_stats = {}
     if config.database_setup.WhichOneof("source") != "existing_db":
-        seed_stats = setup_data(config, scenario, setup_suite)
+        try:
+            seed_stats = setup_data(config, scenario, setup_suite)
+        except BaseException:
+            ctx.close_suite(setup_suite)
+            raise
 
     # Workflow-level storage points (always on; a directory walk each):
-    # after setup, after the scenario (its branches deleted), after the
-    # backend's GC/flush, and after the database itself is dropped.
+    # after setup, after the scenario (its branches deleted) and after the
+    # backend's GC/flush.
     storage_points = {}
     try:
         _flush_to_disk(setup_suite)
@@ -357,7 +314,7 @@ def main(argv=None):
         sampler.start()
 
     progress = SharedProgress(total=scenario.total_units(),
-                              desc=f"{scenario.name} ({backend_name})",
+                              desc=f"{scenario.name} ({system_name})",
                               disable=args.no_progress)
     ctx.progress = progress
 
@@ -414,6 +371,9 @@ def main(argv=None):
     except Exception as e:
         status = f"crashed: {type(e).__name__}: {e}"
         traceback.print_exc()
+    except BaseException as e:
+        status = f"aborted: {type(e).__name__}: {e}"
+        raise
     finally:
         for s, h in previous_handlers.items():
             signal.signal(s, h)
@@ -460,32 +420,11 @@ def main(argv=None):
               f"{storage_points['after_gc']} bytes")
         ctx.close_suite(setup_suite)
 
-        neon_consumption = None
-        if config.measure_storage and config.backend == tp.Backend.NEON:
-            neon_consumption = _fetch_neon_consumption(
-                backend_info.neon_project_id, label="after")
-
         inv = invariants.summary()
-
-        # Drop the database before the record is written so the last
-        # storage point sees the server without it.
-        for attempt in range(2):
-            try:
-                backend_mgr.cleanup()
-                break
-            except Exception as e:
-                if attempt == 0:
-                    print(f"Cleanup failed ({type(e).__name__}), retrying...")
-                    time.sleep(2)
-                else:
-                    print(f"Cleanup failed after retry: {e}")
-        os.sync()
-        storage_points["after_cleanup"] = setup_suite._safe_storage()
-        print(f"Storage after cleanup: {storage_points['after_cleanup']} bytes")
 
         e2e = {
             "run_id": config.run_id,
-            "backend": backend_name,
+            "backend": system_name,
             "scenario": scenario.key,
             "status": status,
             "elapsed_sec": round(elapsed, 2),
@@ -498,12 +437,14 @@ def main(argv=None):
             "schema": MessageToDict(config.schema),
             "workload": MessageToDict(config.workload),
             "setup": seed_stats,
-            "capabilities": _capabilities_for(config.backend),
-            "implementation": _implementation_for(config.backend),
+            "capabilities": target.suite_type.capabilities(),
+            "implementation": implementation_report(target.suite_type),
             "native_only": native_only(),
             "spine_only_sec": config.spine_only_sec,
             "invariants": inv,
             "metrics": ctx.metrics,
+            "work": ctx.work.summary(),
+            "worker_errors": list(ctx.work.worker_errors),
         }
         e2e.update(collector.support_summary())
         observed = getattr(type(setup_suite), "OBSERVED", None)
@@ -526,12 +467,8 @@ def main(argv=None):
             "run_start_time": round(start_time, 3),
             "samples": sampler.samples if sampler is not None else [],
         }
-        if neon_consumption:
-            e2e["neon_metrics_count"] = neon_consumption.get("count", 0)
-            e2e["neon_all_metrics"] = neon_consumption.get("all_metrics", [])
-            for k, v in (neon_consumption.get("summary") or {}).items():
-                e2e[f"neon_{k}"] = v
-
+        if _finalize_result is not None:
+            _finalize_result(e2e, setup_suite)
         os.makedirs(args.outdir, exist_ok=True)
         path = os.path.join(args.outdir, f"{config.run_id}_e2e_stats.json")
         with open(path, "w") as f:
@@ -552,6 +489,54 @@ def main(argv=None):
                 print(f"  {st['op']} on {st['ref'] or '?'} ({st['label']}) after {st['elapsed_sec']}s: {st['outcome']}")
 
         collector.write_to_parquet(append=False)
+    return e2e
+
+
+def main(argv: list[str] | None = None) -> dict:
+    """Prepare the configured database, run the scenario, and clean up."""
+    args, config = _load_args(argv)
+    backend = args.backend or tp.Backend.Name(config.backend)
+    if args.db_name is not None:
+        config.database_setup.db_name = args.db_name
+    connector, database, target = prepare_database(
+        backend.lower(), config.database_setup)
+    cleanup_attempted = False
+
+    def cleanup() -> None:
+        nonlocal cleanup_attempted
+        if cleanup_attempted or not config.database_setup.cleanup:
+            return
+        cleanup_attempted = True
+        for attempt in range(2):
+            try:
+                connector.delete_database(database)
+                break
+            except Exception as error:
+                if attempt == 0:
+                    print(f"Cleanup failed ({type(error).__name__}), retrying...")
+                    time.sleep(2)
+                else:
+                    print(f"Cleanup failed after retry: {error}")
+
+    def finalize_result(e2e: dict, setup_suite: object) -> None:
+        metrics = (connector.consumption_metrics(database)
+                   if config.measure_storage else None)
+        if metrics:
+            e2e["neon_metrics_count"] = metrics.get("count", 0)
+            e2e["neon_all_metrics"] = metrics.get("all_metrics", [])
+            for key, value in (metrics.get("summary") or {}).items():
+                e2e[f"neon_{key}"] = value
+        cleanup()
+        os.sync()
+        after_cleanup = setup_suite._safe_storage()
+        e2e["storage"]["points"]["after_cleanup"] = after_cleanup
+        print(f"Storage after cleanup: {after_cleanup} bytes")
+
+    try:
+        return _run(args, config, target=target, system_name=backend.upper(),
+                    _finalize_result=finalize_result)
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":

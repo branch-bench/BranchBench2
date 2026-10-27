@@ -17,7 +17,7 @@ from psycopg2.extensions import connection as _pgconn
 
 from dblib.db_api import DBToolSuite, Ref
 import dblib.result_collector as rc
-import dblib.util as dbutil
+from dblib import util as dbutil
 
 DOLT_USER = os.environ.get("DOLT_USER", "postgres")
 DOLT_PASSWORD = os.environ.get("DOLT_PASSWORD", "password")

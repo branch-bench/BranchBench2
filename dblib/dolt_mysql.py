@@ -11,9 +11,8 @@ import pymysql
 from pymysql.constants import CLIENT
 
 from dblib.db_api import DBToolSuite, Ref
-from dblib import mysql_common
+from dblib import util as dbutil, mysql_common
 import dblib.result_collector as rc
-import dblib.util as dbutil
 
 DOLT_MYSQL_USER = os.environ.get("DOLT_MYSQL_USER", "root")
 DOLT_MYSQL_PASSWORD = os.environ.get("DOLT_MYSQL_PASSWORD", "")

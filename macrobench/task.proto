@@ -6,7 +6,6 @@ package macrobench;
 // Macrobenchmark configuration: one scenario (workload) over one schema.
 //
 // A run is described by
-//   * database_setup  -- where the database lives and how it is created;
 //   * schema          -- the base schema (CH-benCHmark by default, generated
 //                        at a scale factor) plus per-scenario extensions;
 //   * workload        -- which scenario runs, its structural parameters
@@ -14,11 +13,16 @@ package macrobench;
 //                        (how much SQL each exec() step issues, how much
 //                        concurrent spine traffic there is).
 //
+// The CLI provisions the database using backend and database_setup.
+// Embedding applications can supply a dblib.target.PreparedTarget instead.
+// These setup fields are not part of a workload's identity.
+//
 // Each scenario ships two textprotos in macrobench/configs: <name>.textproto
 // with the paper's parameters and <name>_mini.textproto for smoke runs.
 // ============================================================================
 
-// All supported database backends (mirrors microbench)
+// Built-in integrations selectable by the CLI. New integrations also work
+// via --backend without adding an enum value.
 enum Backend {
     NEON = 0;
     DOLT = 1;
@@ -32,7 +36,7 @@ enum Backend {
 }
 
 // ---------------------------------------------------------------------------
-// Database setup
+// Database setup for the CLI. Existing databases skip schema and seed data.
 // ---------------------------------------------------------------------------
 
 // Reuse an existing database (schema and data already in place).
@@ -41,7 +45,8 @@ message ExistingDatabase {
     string neon_project_id = 2;
 }
 
-// Create the database from a SQL dump (Postgres backends: loaded with psql).
+// Load a SQL dump, then apply the schema and seed generators as usual.
+// Use existing_db when schema and data are already complete.
 message SqlDump {
     string sql_dump_path = 1;
 }
@@ -294,7 +299,7 @@ message Invariants {
 // Top-level macrobenchmark configuration
 message MacroBenchConfig {
     string run_id = 1;
-    Backend backend = 2;
+    optional Backend backend = 2;  // Presence prevents an implicit NEON default.
     DatabaseSetup database_setup = 3;
     SchemaConfig schema = 4;
     Workload workload = 5;

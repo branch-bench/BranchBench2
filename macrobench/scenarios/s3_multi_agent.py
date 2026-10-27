@@ -225,7 +225,7 @@ class MultiAgentScenario(Scenario):
         res = ctx.branch(suite, branch, checkpoint, label="agent_branch")
         if not res.ok:
             ctx.note(f"agent {a}: branch {res.status_name} {res.error}")
-            ctx.tick()
+            ctx.tick(outcome="failed")
             return None
         sentinel_value = f"r{r}-a{a}"
         w.exec(self._revision_script(w, r, a, sentinel_value), branch, label="revise")

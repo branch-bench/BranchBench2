@@ -43,7 +43,6 @@ from collections import OrderedDict
 from typing import Any, Optional
 
 import psycopg
-from dotenv import load_dotenv
 
 import dblib.result_collector as rc
 from dblib.db_api import DBToolSuite, Ref, Session, UnsupportedOperation, native_only
@@ -80,8 +79,6 @@ except ImportError:  # pragma: no cover - the backend is optional
         pass
 
     ChronosBranchContext = None
-
-load_dotenv()
 
 PGSQL_USER = os.getenv("PGSQL_USER", "elaineang")
 PGSQL_PASSWORD = os.getenv("PGSQL_PASSWORD", "")

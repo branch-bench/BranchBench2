@@ -63,14 +63,11 @@ import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 import sqlglot
-from dotenv import load_dotenv
 from sqlglot import exp
 
 from dblib.db_api import DBToolSuite, Ref
 import dblib.result_collector as rc
 from util.sql_parse import get_sql_operation_keyword
-
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 # Credentials: an API key, or a profile in ~/.bauplan/config.yaml (the
 # default profile when neither is set).
@@ -284,10 +281,9 @@ def drop_database(db_name: str) -> None:
         if branch.name == root or branch.name.startswith(root + _BRANCH_SEP):
             client.delete_branch(branch.name, if_exists=True)
     fs, base = _s3_fs()
-    try:
-        fs.delete_dir(f"{base}/{db_name}")
-    except (FileNotFoundError, OSError):
-        pass
+    path = f"{base}/{db_name}"
+    if fs.get_file_info(path).type != pafs.FileType.NotFound:
+        fs.delete_dir(path)
     print(f"Bauplan run '{root}' deleted.")
 
 

@@ -63,9 +63,8 @@ import pymysql
 from pymysql.constants import CLIENT
 
 from dblib.db_api import DBToolSuite, Ref, native_only
-from dblib import mysql_common
+from dblib import util as dbutil, mysql_common
 import dblib.result_collector as rc
-import dblib.util as dbutil
 
 SEEKDB_USER = os.environ.get("SEEKDB_USER", "root")
 SEEKDB_PASSWORD = os.environ.get("SEEKDB_PASSWORD", "")
