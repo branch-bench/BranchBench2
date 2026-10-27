@@ -9,6 +9,7 @@ from google.protobuf import text_format
 
 from dblib import result_collector as rc
 from dblib.target import PreparedTarget, SuiteRequest
+from macrobench import faults
 from macrobench import runner as macro_runner
 from macrobench import task_pb2 as mtp
 from macrobench.datagen.ch import CHScale
@@ -79,6 +80,25 @@ def test_macrobench_main_runs_a_scenario_and_reports_work(tmp_path):
     written = json.loads((tmp_path / "bb_smoke_e2e_stats.json").read_text())
     assert written["work"] == work and written["capabilities"]["commit"] is True
     assert (tmp_path / "bb_smoke.parquet").is_file()
+
+
+def test_macrobench_main_reports_a_crashed_task_in_work_and_worker_errors(tmp_path):
+    """rl_env runs its tasks on the caller's thread (worker_threads unset): a task that
+    raises is still one failed unit of work and one worker error in the emitted stats."""
+    config = tmp_path / "rl_env.textproto"
+    config.write_text('run_id: "bb_crash" seed: 7 ' + CONFIGS["rl_env"])
+    suite = FakeSuite(rc.ResultCollector())
+    target, _ = shared_target(suite)
+
+    with mock.patch.object(faults, "pick_fault", side_effect=ValueError("boom")):
+        e2e = macro_runner.main(["--config", str(config), "--outdir", str(tmp_path), "--no-progress"],
+                                target=target, system_name="fake")
+
+    assert e2e["status"] == "completed"
+    assert e2e["work"] == {"expected": 6, "succeeded": 0, "failed": 2, "skipped": 0}
+    assert [e["error"] for e in e2e["worker_errors"]] == ["ValueError: boom"] * 2
+    written = json.loads((tmp_path / "bb_crash_e2e_stats.json").read_text())
+    assert (written["work"], written["worker_errors"]) == (e2e["work"], e2e["worker_errors"])
 
 
 def test_verbs_main_measures_one_point_on_the_target(tmp_path):

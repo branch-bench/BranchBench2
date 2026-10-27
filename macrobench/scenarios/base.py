@@ -325,12 +325,7 @@ class ScenarioContext:
             # Same thread as the caller keeps suites/thread ids simple.
             w = init_worker()
             for i, item in enumerate(items):
-                try:
-                    results[i] = fn(w, item)
-                except Exception as e:
-                    results[i] = e
-                    if not isinstance(e, ScenarioStopped):
-                        self.note(f"[W{w.id}] {type(e).__name__}: {e}")
+                task(i, item)
             self.close_suite(w.suite)
             if self.unsupported_abort:
                 raise UnsupportedOperationAbort(self.unsupported_abort)
