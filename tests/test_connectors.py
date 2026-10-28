@@ -44,6 +44,16 @@ def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
         assert first.state_dir == tmp_path
 
 
+def test_dolt_mysql_preflight_checks_server_identity() -> None:
+    server = load_connector("dolt_mysql")
+    conn = mock.MagicMock()
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.fetchone.return_value = ("2.4.2",)
+    with mock.patch("dblib.connectors.dolt_mysql.dolt_mysql.connect", return_value=conn):
+        server.preflight()
+    cur.execute.assert_called_once_with("SELECT dolt_version()")
+
+
 @pytest.mark.parametrize("name", ["", "db;DROP TABLE x", "../db", "MixedCase", "x" * 64])
 def test_invalid_database_name_fails_before_loading_a_provider(name) -> None:
     setup = setup_config()

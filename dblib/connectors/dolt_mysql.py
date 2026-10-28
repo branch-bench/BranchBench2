@@ -21,6 +21,9 @@ class Dolt(Connector):
         return {"host": dolt_mysql.DOLT_MYSQL_HOST, "port": dolt_mysql.DOLT_MYSQL_PORT,
                 "user": dolt_mysql.DOLT_MYSQL_USER, "data_dir": str(self.data_dir.resolve())}
 
+    def preflight(self) -> None:
+        self.version()
+
     def provision(self, db: str) -> DatabaseHandle:
         with closing(dolt_mysql.connect()) as conn, conn.cursor() as cur:
             cur.execute(f"CREATE DATABASE {db}")
