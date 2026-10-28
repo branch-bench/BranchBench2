@@ -30,7 +30,7 @@ def server_mock() -> mock.Mock:
 
 def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
     names = connector_names()
-    assert names == ["bauplan", "chronos", "dolt", "dolt_demo", "dolt_mysql", "file_copy",
+    assert names == ["bauplan", "chronos", "dolt", "dolt_mysql", "file_copy", "inkeun_demo_db",
                      "matrixone", "neon", "seekdb", "terminusdb", "xata"]
     with mock.patch("dblib.connector.importlib.import_module") as imported:
         assert connector_names() == names
@@ -46,20 +46,20 @@ def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
         assert first.state_dir == tmp_path
 
 
-def test_dolt_demo_uses_a_distinct_backend_identity() -> None:
-    from dblib.dolt_demo import DoltDemoToolSuite
+def test_inkeun_demo_db_uses_a_distinct_backend_identity() -> None:
+    from dblib.inkeun_demo_db import InkeunDemoDBToolSuite
 
-    server = load_connector("dolt_demo")
+    server = load_connector("inkeun_demo_db")
     database = DatabaseHandle("bb_test", "main")
     request = SuiteRequest(rc.ResultCollector(), "main", 0, measure_storage=True)
     target = server.prepare_target(database)
 
-    with mock.patch.object(DoltDemoToolSuite, "init_for_bench",
+    with mock.patch.object(InkeunDemoDBToolSuite, "init_for_bench",
                            return_value=mock.sentinel.suite) as init:
         assert target.open_suite(request) is mock.sentinel.suite
 
-    assert target.suite_type is DoltDemoToolSuite
-    assert target.suite_type.BACKEND_NAME == "dolt_demo"
+    assert target.suite_type is InkeunDemoDBToolSuite
+    assert target.suite_type.BACKEND_NAME == "inkeun_demo_db"
     init.assert_called_once_with(request.result_collector, "bb_test", "main", True)
 
 

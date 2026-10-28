@@ -5,7 +5,7 @@ from __future__ import annotations
 from dblib.dolt_mysql import DoltMySQLToolSuite
 
 
-class DoltDemoToolSuite(DoltMySQLToolSuite):
-    """Dolt-backed adapter with a distinct demo result identity."""
+class InkeunDemoDBToolSuite(DoltMySQLToolSuite):
+    """Mock adapter with a separate alpha result identity."""
 
-    BACKEND_NAME = "dolt_demo"
+    BACKEND_NAME = "inkeun_demo_db"
