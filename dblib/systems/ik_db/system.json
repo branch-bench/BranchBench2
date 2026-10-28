@@ -1,0 +1,9 @@
+{
+  "system": "IK-DB",
+  "proprietary": "no",
+  "hosted": "no",
+  "tuned": "no",
+  "tags": ["MySQL protocol", "Git-style branches"],
+  "requirements": "The IK-DB server binary; install fetches it.",
+  "credentials": []
+}

@@ -1,0 +1,22 @@
+#!/bin/bash
+# Verify that the IK-DB process is alive and ready for SQL.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+[ -f "$runs/ik_db.pid" ] && kill -0 "$(cat "$runs/ik_db.pid")" 2>/dev/null || exit 1
+
+"${PYTHON:-python3}" - <<'EOF'
+import os
+
+import pymysql
+
+conn = pymysql.connect(
+    host=os.environ.get("DOLT_MYSQL_HOST") or os.environ.get("DBFORK_SERVER_HOST", "127.0.0.1"),
+    port=int(os.environ.get("DOLT_MYSQL_PORT", "3306")),
+    user=os.environ.get("DOLT_MYSQL_USER", "root"),
+    password=os.environ.get("DOLT_MYSQL_PASSWORD", ""),
+    connect_timeout=2,
+)
+with conn, conn.cursor() as cur:
+    cur.execute("SELECT dolt_version()")
+EOF
