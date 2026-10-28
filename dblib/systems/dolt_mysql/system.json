@@ -1,0 +1,9 @@
+{
+  "system": "Dolt",
+  "proprietary": "no",
+  "hosted": "no",
+  "tuned": "no",
+  "tags": ["Go", "MySQL protocol", "Git-style branches"],
+  "requirements": "Dolt CLI on PATH.",
+  "credentials": []
+}

@@ -4,8 +4,8 @@ against a live one (skipped when none answers at TERMINUSDB_URL)."""
 import pytest
 
 from dblib import result_collector as rc
-from dblib import terminusdb
-from dblib.terminusdb import NotSupportedError
+from dblib.systems.terminusdb import adapter as terminusdb
+from dblib.systems.terminusdb.adapter import NotSupportedError
 from util import db_helpers as dbh
 
 DB = "bb_test_terminusdb"

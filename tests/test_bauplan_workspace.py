@@ -7,7 +7,7 @@ import decimal
 import duckdb
 import pyarrow as pa
 
-from dblib import bauplan as bp
+from dblib.systems.bauplan import adapter as bp
 
 
 def test_to_duckdb_placeholders():

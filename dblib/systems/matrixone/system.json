@@ -1,0 +1,9 @@
+{
+  "system": "MatrixOne",
+  "proprietary": "no",
+  "hosted": "no",
+  "tuned": "no",
+  "tags": ["Go", "MySQL protocol", "Copy-on-write branches"],
+  "requirements": "MatrixOne (mo-service) binary installed.",
+  "credentials": []
+}

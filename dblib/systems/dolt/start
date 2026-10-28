@@ -1,0 +1,40 @@
+#!/bin/bash
+# Start Doltgres the way dblib/systems/dolt/adapter.py expects it: localhost:5432, user postgres.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+data_dir="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
+host="${DOLT_HOST:-${DBFORK_SERVER_HOST:-127.0.0.1}}"
+port="${DOLT_PORT:-5432}"
+mkdir -p "$runs" "$data_dir"
+
+if [ -f "$runs/dolt.pid" ] && kill -0 "$(cat "$runs/dolt.pid")" 2>/dev/null; then
+    echo "Doltgres already running (pid $(cat "$runs/dolt.pid"))"
+    exit 0
+fi
+
+if command -v doltgres >/dev/null 2>&1; then
+    doltgres_bin="$(command -v doltgres)"
+elif [ -x "$HOME/doltgres-1.4.0/dl/doltgresql-linux-amd64/bin/doltgres" ]; then
+    doltgres_bin="$HOME/doltgres-1.4.0/dl/doltgresql-linux-amd64/bin/doltgres"
+else
+    echo "doltgres binary not found" >&2
+    exit 1
+fi
+
+if [ ! -f "$HOME/.dolt/config_global.json" ]; then
+    mkdir -p "$HOME/.dolt"
+    printf '{"user.name":"benchmark","user.email":"benchmark@localhost"}\n' > "$HOME/.dolt/config_global.json"
+fi
+
+cat > "$runs/dolt_config.yaml" <<EOF
+listener:
+  host: "$host"
+  port: $port
+data_dir: "$data_dir"
+EOF
+
+# -chdir keeps the .doltcfg folder Doltgres writes inside its data directory.
+# The redirect detaches the server from the caller's output, so the caller never waits on it.
+"$doltgres_bin" --config "$runs/dolt_config.yaml" -chdir "$data_dir" > "$runs/dolt.log" 2>&1 &
+echo $! > "$runs/dolt.pid"

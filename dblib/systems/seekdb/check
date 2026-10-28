@@ -1,0 +1,29 @@
+#!/bin/bash
+# Exit 0 only if the SeekDB process that start launched is alive and the
+# adapter's port answers as an OceanBase/SeekDB server.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+[ -f "$runs/seekdb.pid" ] && kill -0 "$(cat "$runs/seekdb.pid")" 2>/dev/null || exit 1
+
+"${PYTHON:-python3}" - <<'EOF'
+import os
+import sys
+
+import pymysql
+
+conn = pymysql.connect(
+    host=os.environ.get("SEEKDB_HOST", "127.0.0.1"),
+    port=int(os.environ.get("SEEKDB_PORT", "2881")),
+    user=os.environ.get("SEEKDB_USER", "root"),
+    password=os.environ.get("SEEKDB_PASSWORD", ""),
+    autocommit=True,
+    connect_timeout=2,
+)
+with conn, conn.cursor() as cur:
+    cur.execute("SELECT version()")
+    version = str(cur.fetchone()[0])
+    if "OceanBase" not in version and "SeekDB" not in version:
+        sys.exit(1)
+    cur.execute("ALTER SYSTEM SET undo_retention = 86400")
+EOF

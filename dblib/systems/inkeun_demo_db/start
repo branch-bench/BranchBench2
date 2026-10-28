@@ -1,0 +1,34 @@
+#!/bin/bash
+# Start the mock backend for inkeun-demo-db on its local MySQL endpoint.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+data_dir="${DOLT_MYSQL_DATA_DIR:-$HOME/dolt/databases}"
+host="${DOLT_MYSQL_HOST:-${DBFORK_SERVER_HOST:-127.0.0.1}}"
+port="${DOLT_MYSQL_PORT:-3306}"
+mkdir -p "$runs" "$data_dir"
+
+if [ -f "$runs/inkeun_demo_db.pid" ] && kill -0 "$(cat "$runs/inkeun_demo_db.pid")" 2>/dev/null; then
+    echo "inkeun-demo-db already running (pid $(cat "$runs/inkeun_demo_db.pid"))"
+    exit 0
+fi
+
+if command -v dolt >/dev/null 2>&1; then
+    dolt_bin="$(command -v dolt)"
+elif [ -x "$HOME/dolt/bin/dolt" ]; then
+    dolt_bin="$HOME/dolt/bin/dolt"
+else
+    echo "inkeun-demo-db mock backend binary not found" >&2
+    exit 1
+fi
+
+if [ ! -f "$HOME/.dolt/config_global.json" ]; then
+    "$dolt_bin" config --global --add user.email "benchmark@localhost" >/dev/null 2>&1 || true
+    "$dolt_bin" config --global --add user.name "benchmark" >/dev/null 2>&1 || true
+fi
+
+cd "$data_dir"
+"$dolt_bin" sql-server --data-dir "$data_dir" \
+    --host "$host" --port "$port" \
+    > "$runs/inkeun_demo_db.log" 2>&1 &
+echo $! > "$runs/inkeun_demo_db.pid"

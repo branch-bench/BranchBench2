@@ -1,0 +1,24 @@
+#!/bin/bash
+# Ensure SeekDB (OceanBase) is installed in one of the locations seekdb/start checks.
+set -euo pipefail
+
+if [ -n "${SEEKDB_BIN:-}" ] && [ -x "$SEEKDB_BIN" ]; then
+    exit 0
+fi
+if command -v seekdb >/dev/null 2>&1 \
+    || [ -x "/opt/homebrew/opt/seekdb/bin/seekdb" ] \
+    || [ -x "$HOME/seekdb/bin/seekdb" ] \
+    || [ -x "$HOME/seekdb/build/debug/src/observer/seekdb" ]; then
+    exit 0
+fi
+
+if [ -n "${SEEKDB_ARCHIVE_URL:-}" ]; then
+    mkdir -p "$HOME/seekdb"
+    curl -fsSL "$SEEKDB_ARCHIVE_URL" | tar -xz -C "$HOME/seekdb"
+    if [ -x "$HOME/seekdb/bin/seekdb" ] || [ -x "$HOME/seekdb/build/debug/src/observer/seekdb" ]; then
+        exit 0
+    fi
+fi
+
+echo "SeekDB binary not found in ~/seekdb or PATH; use --ami-id with prebaked ~/seekdb or set SEEKDB_ARCHIVE_URL" >&2
+exit 1

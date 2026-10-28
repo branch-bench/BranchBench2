@@ -8,7 +8,7 @@ import time
 import pytest
 
 from dblib import result_collector as rc
-from dblib import file_copy as file_copy
+from dblib.systems.file_copy import adapter as file_copy
 
 DB = "bb_test_fc"
 

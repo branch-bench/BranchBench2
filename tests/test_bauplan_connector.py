@@ -3,7 +3,8 @@ from unittest import mock
 
 import pytest
 
-from dblib import bauplan, result_collector as rc
+from dblib import result_collector as rc
+from dblib.systems.bauplan import adapter as bauplan
 from dblib.connector import DatabaseHandle, load_connector
 from dblib.target import SuiteRequest
 from macrobench import runner as macro_runner

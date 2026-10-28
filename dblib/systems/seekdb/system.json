@@ -1,0 +1,9 @@
+{
+  "system": "SeekDB",
+  "proprietary": "no",
+  "hosted": "no",
+  "tuned": "no",
+  "tags": ["C++", "MySQL protocol", "Copy-on-write branches"],
+  "requirements": "SeekDB (OceanBase) binary installed.",
+  "credentials": []
+}

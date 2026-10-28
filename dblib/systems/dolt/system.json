@@ -1,0 +1,9 @@
+{
+  "system": "Doltgres",
+  "proprietary": "no",
+  "hosted": "no",
+  "tuned": "no",
+  "tags": ["Go", "Postgres protocol", "Git-style branches"],
+  "requirements": "Doltgres and psql (libpq) on PATH.",
+  "credentials": []
+}

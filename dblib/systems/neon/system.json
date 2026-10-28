@@ -1,0 +1,9 @@
+{
+  "system": "Neon",
+  "proprietary": "yes",
+  "hosted": "yes",
+  "tuned": "no",
+  "tags": ["Postgres protocol", "Copy-on-write branches"],
+  "requirements": "psql (libpq) on PATH.",
+  "credentials": ["NEON_API_KEY_ORG"]
+}

@@ -1,0 +1,52 @@
+#!/bin/bash
+# Start MatrixOne the way dblib/systems/matrixone/adapter.py expects it:
+# 127.0.0.1:6001, user root with password 111, data in ~/mo/matrixone/mo-data.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+data_dir="${MO_DATA_DIR:-$HOME/mo/matrixone/mo-data}"
+if [ -n "${MO_HOME:-}" ]; then
+    mo_root="$MO_HOME"
+elif [ -f "$(dirname "$data_dir")/etc/launch/launch.toml" ]; then
+    mo_root="$(dirname "$data_dir")"
+else
+    mo_root="$HOME/mo/matrixone"
+fi
+mkdir -p "$runs" "$data_dir"
+
+if [ -f "$runs/matrixone.pid" ] && kill -0 "$(cat "$runs/matrixone.pid")" 2>/dev/null; then
+    echo "MatrixOne already running (pid $(cat "$runs/matrixone.pid"))"
+    exit 0
+fi
+
+if [ ! -f "$mo_root/etc/launch/launch.toml" ]; then
+    echo "MatrixOne launch configuration not found at $mo_root/etc/launch/launch.toml" >&2
+    exit 1
+fi
+
+if [ "$data_dir" != "$mo_root/mo-data" ]; then
+    if [ -d "$mo_root/mo-data" ] && [ ! -L "$mo_root/mo-data" ]; then
+        rmdir "$mo_root/mo-data" 2>/dev/null || {
+            echo "Cannot redirect $mo_root/mo-data to $data_dir: $mo_root/mo-data is a non-empty directory" >&2
+            exit 1
+        }
+    fi
+    ln -sfn "$data_dir" "$mo_root/mo-data"
+fi
+
+if [ -n "${MO_BIN:-}" ]; then
+    mo_bin="$MO_BIN"
+elif [ -x "$mo_root/mo-service" ]; then
+    mo_bin="$mo_root/mo-service"
+elif [ -x "$HOME/mo/matrixone/mo-service" ]; then
+    mo_bin="$HOME/mo/matrixone/mo-service"
+else
+    mo_bin="$(command -v mo-service)"
+fi
+
+ulimit -n 65536 2>/dev/null || true
+cd "$mo_root"
+export DYLD_LIBRARY_PATH="$mo_root/cgo:$mo_root/lib:$mo_root/thirdparties/install/lib:${DYLD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$mo_root/cgo:$mo_root/lib:$mo_root/thirdparties/install/lib:${LD_LIBRARY_PATH:-}"
+"$mo_bin" -launch ./etc/launch/launch.toml > "$runs/matrixone.log" 2>&1 &
+echo $! > "$runs/matrixone.pid"

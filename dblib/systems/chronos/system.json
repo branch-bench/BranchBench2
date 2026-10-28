@@ -1,0 +1,9 @@
+{
+  "system": "Chronos",
+  "proprietary": "no",
+  "hosted": "no",
+  "tuned": "no",
+  "tags": ["Python", "Postgres protocol", "Interval branching"],
+  "requirements": "PostgreSQL 18 (postgres, pg_ctl, initdb), psql (libpq) on PATH, and the chronos-core Python package installed.",
+  "credentials": []
+}

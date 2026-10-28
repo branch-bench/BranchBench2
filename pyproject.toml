@@ -43,7 +43,7 @@ include-package-data = true
 include = ["dblib*", "microbench*", "macrobench*", "util*", "db_setup*"]
 
 [tool.setuptools.package-data]
-dblib = ["*.proto"]
+dblib = ["*.proto", "systems/*/README.md", "systems/*/system.json", "systems/*/install", "systems/*/start", "systems/*/check", "systems/*/stop"]
 microbench = ["*.proto", "*.textproto"]
 macrobench = ["*.proto", "configs/*.textproto", "schema/*.sql"]
 db_setup = ["*.sql", "*.sh"]

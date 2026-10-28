@@ -1,0 +1,56 @@
+#!/bin/bash
+# Start PostgreSQL 18 on port 5433 the way dblib/systems/chronos/adapter.py expects it.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+data_dir="${CHRONOS_DATA_DIR:-${PGSQL_DATA_DIR:-$HOME/pg_chronos/data}}"
+host="${CHRONOS_HOST:-${PGSQL_HOST:-${DBFORK_SERVER_HOST:-localhost}}}"
+port="${CHRONOS_PORT:-${PGSQL_PORT:-5433}}"
+mkdir -p "$runs" "$(dirname "$data_dir")"
+
+if [ -f "$runs/chronos.pid" ] && kill -0 "$(cat "$runs/chronos.pid")" 2>/dev/null; then
+    echo "PostgreSQL (chronos) already running (pid $(cat "$runs/chronos.pid"))"
+    exit 0
+fi
+
+if [ -x "/opt/homebrew/opt/postgresql@18/bin/postgres" ]; then
+    pg_bin_dir="/opt/homebrew/opt/postgresql@18/bin"
+elif [ -x "/usr/local/opt/postgresql@18/bin/postgres" ]; then
+    pg_bin_dir="/usr/local/opt/postgresql@18/bin"
+elif [ -x "/usr/lib/postgresql/18/bin/postgres" ]; then
+    pg_bin_dir="/usr/lib/postgresql/18/bin"
+else
+    pg_bin_dir="$(dirname "$(command -v postgres)")"
+fi
+
+if [ ! -f "$data_dir/PG_VERSION" ]; then
+    "$pg_bin_dir/initdb" -D "$data_dir" --auth=trust --no-locale --encoding=UTF8 > "$runs/chronos.init.log" 2>&1
+fi
+
+if "$pg_bin_dir/pg_ctl" -D "$data_dir" status >/dev/null 2>&1; then
+    echo "PostgreSQL (chronos) already running on $data_dir"
+    exit 0
+fi
+if [ -f "$data_dir/postmaster.pid" ]; then
+    pm_pid="$(head -n 1 "$data_dir/postmaster.pid" 2>/dev/null || true)"
+    if [ -n "$pm_pid" ] && kill -0 "$pm_pid" 2>/dev/null; then
+        echo "Another postmaster (pid $pm_pid) is running on $data_dir" >&2
+        exit 1
+    fi
+    rm -f "$data_dir/postmaster.pid"
+fi
+if [ "$(uname -s)" = "Linux" ]; then
+    pg_sb="${PG_SHARED_BUFFERS:-4GB}"
+else
+    pg_sb="${PG_SHARED_BUFFERS:-512MB}"
+fi
+"$pg_bin_dir/postgres" -D "$data_dir" -h "$host" -p "$port" -k /tmp \
+    -c shared_buffers="$pg_sb" \
+    -c max_connections=400 \
+    -c work_mem=64MB \
+    -c maintenance_work_mem=512MB \
+    -c max_wal_size=4GB \
+    -c checkpoint_completion_target=0.5 \
+    -c deadlock_timeout=2s \
+    -c autovacuum_worker_slots=16 > "$runs/chronos.log" 2>&1 &
+echo $! > "$runs/chronos.pid"

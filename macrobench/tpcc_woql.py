@@ -39,7 +39,7 @@ statements in autocommit mode.
 import time
 
 from dblib.db_api import OpStatus, Ref, _SessionBase
-from dblib.terminusdb import (
+from dblib.systems.terminusdb.adapter import (
     _and, _compare, _lit, _node, _not, _or, _plain, _triple, _var,
 )
 from macrobench.datagen.ch import CHScale, DISTRICTS_PER_WAREHOUSE

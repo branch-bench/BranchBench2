@@ -6,7 +6,7 @@ import socket
 import pytest
 
 from dblib import result_collector as rc
-from dblib import matrixone as matrixone
+from dblib.systems.matrixone import adapter as matrixone
 
 DB = "bb_test_mo"
 

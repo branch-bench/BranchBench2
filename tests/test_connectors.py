@@ -29,15 +29,14 @@ def server_mock() -> mock.Mock:
 
 
 def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
-    names = connector_names()
+    with mock.patch("dblib.connector.import_module") as imported:
+        names = connector_names()
+        imported.assert_not_called()
     assert names == ["bauplan", "chronos", "dolt", "dolt_mysql", "file_copy", "inkeun_demo_db",
                      "matrixone", "neon", "seekdb", "terminusdb", "xata"]
-    with mock.patch("dblib.connector.importlib.import_module") as imported:
-        assert connector_names() == names
-        imported.assert_not_called()
-        with pytest.raises(ValueError, match="no built-in"):
-            load_connector("../neon")
-        imported.assert_not_called()
+    assert connector_names() == names
+    with pytest.raises(ValueError, match="no built-in"):
+        load_connector("../neon")
     for name in names:
         first = load_connector(name, state_dir=tmp_path)
         second = load_connector(name, state_dir=tmp_path)
@@ -47,7 +46,7 @@ def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
 
 
 def test_inkeun_demo_db_uses_a_distinct_backend_identity() -> None:
-    from dblib.inkeun_demo_db import InkeunDemoDBToolSuite
+    from dblib.systems.inkeun_demo_db.adapter import InkeunDemoDBToolSuite
 
     server = load_connector("inkeun_demo_db")
     database = DatabaseHandle("bb_test", "main")
@@ -127,7 +126,7 @@ def test_cleanup_covers_load_and_execution_failure(failure, tmp_path) -> None:
 @pytest.mark.parametrize("name", ["dolt", "dolt_mysql", "seekdb", "matrixone", "file_copy", "chronos"])
 def test_duplicate_create_after_collision_check_never_deletes_the_winner(name, tmp_path) -> None:
     server = load_connector(name, state_dir=tmp_path)
-    module = __import__(f"dblib.connectors.{name}", fromlist=[name])
+    module = __import__(f"dblib.systems.{name}.connector", fromlist=[name])
     conn = mock.MagicMock()
     cursor = conn.cursor.return_value.__enter__.return_value
     cursor.execute.side_effect = DuplicateDatabase("another run created bb_test")
@@ -157,7 +156,7 @@ def test_duplicate_create_after_collision_check_never_deletes_the_winner(name, t
 
 @pytest.mark.parametrize("name", ["neon", "xata"])
 def test_hosted_partial_provision_deletes_only_the_owned_project(name) -> None:
-    module = __import__(f"dblib.connectors.{name}", fromlist=[name])
+    module = __import__(f"dblib.systems.{name}.connector", fromlist=[name])
     server = load_connector(name)
     if name == "neon":
         create = mock.patch.object(module.NeonToolSuite, "create_neon_project", return_value={
@@ -180,7 +179,7 @@ def test_hosted_partial_provision_deletes_only_the_owned_project(name) -> None:
 
 
 def test_neon_failed_project_initialization_removes_the_returned_project() -> None:
-    from dblib import neon
+    from dblib.systems.neon import adapter as neon
 
     project = {"project": {"id": "owned-project"}, "operations": [{"id": "op"}]}
     with mock.patch.object(neon, "api_request", return_value=project) as request, \
@@ -191,7 +190,7 @@ def test_neon_failed_project_initialization_removes_the_returned_project() -> No
 
 
 def test_xata_failed_branch_initialization_removes_the_returned_project() -> None:
-    from dblib.xata import XataToolSuite
+    from dblib.systems.xata.adapter import XataToolSuite
 
     with mock.patch.object(XataToolSuite, "_request", side_effect=[
             {"id": "owned-project"}, RuntimeError("branch creation failed")]), \
@@ -202,7 +201,7 @@ def test_xata_failed_branch_initialization_removes_the_returned_project() -> Non
 
 
 def test_owned_partial_provision_cleanup_failure_remains_visible() -> None:
-    from dblib.connectors import neon
+    from dblib.systems.neon import connector as neon
 
     project = {"project": {"id": "owned-project"}, "branch": {"id": "br", "name": "main"}}
     with mock.patch.object(neon.NeonToolSuite, "create_neon_project", return_value=project), \
@@ -215,7 +214,7 @@ def test_owned_partial_provision_cleanup_failure_remains_visible() -> None:
 
 @pytest.mark.parametrize("name", ["dolt_mysql", "seekdb", "matrixone"])
 def test_database_existence_treats_underscore_as_literal(name, tmp_path) -> None:
-    module = __import__(f"dblib.connectors.{name}", fromlist=[name])
+    module = __import__(f"dblib.systems.{name}.connector", fromlist=[name])
     server = load_connector(name)
     server.data_dir = tmp_path
     conn = mock.MagicMock()
@@ -297,7 +296,7 @@ def test_missing_dump_fails_before_provider_access(tmp_path) -> None:
 @pytest.mark.parametrize("name,root", [("file_copy", "bb_test"), ("chronos", "main")])
 def test_attach_does_not_initialize_or_delete_existing_data(name, root) -> None:
     server = load_connector(name)
-    module = __import__(f"dblib.connectors.{name}", fromlist=[name])
+    module = __import__(f"dblib.systems.{name}.connector", fromlist=[name])
     suite = module.FileCopyToolSuite if name == "file_copy" else module.chronos.ChronosToolSuite
     info = "FileCopyInfo" if name == "file_copy" else "ChronosInfo"
     with mock.patch.object(server, "exists", return_value=True), mock.patch.object(suite, info) as initialize:
@@ -308,7 +307,7 @@ def test_attach_does_not_initialize_or_delete_existing_data(name, root) -> None:
 
 @pytest.mark.parametrize("branch_id,expected", [("", "br-default"), ("br-selected", "br-selected")])
 def test_neon_attach_and_cleanup_use_supplied_project_identity(branch_id, expected) -> None:
-    from dblib.connectors import neon
+    from dblib.systems.neon import connector as neon
 
     branches = {"branches": [
         {"id": "br-default", "name": "main", "default": True},
@@ -328,7 +327,7 @@ def test_neon_attach_and_cleanup_use_supplied_project_identity(branch_id, expect
 
 
 def test_neon_consumption_metrics_waits_for_nonempty_metrics() -> None:
-    from dblib.connectors import neon
+    from dblib.systems.neon import connector as neon
 
     server = load_connector("neon")
     database = DatabaseHandle(
@@ -344,7 +343,7 @@ def test_neon_consumption_metrics_waits_for_nonempty_metrics() -> None:
 
 
 def test_file_copy_recovery_state_survives_fresh_connector_instance(tmp_path) -> None:
-    from dblib.connectors import file_copy
+    from dblib.systems.file_copy import connector as file_copy
 
     server = load_connector("file_copy", state_dir=tmp_path)
     events = []
@@ -395,7 +394,7 @@ def test_file_copy_recovery_state_survives_fresh_connector_instance(tmp_path) ->
 
 
 def test_file_copy_failed_method_setup_removes_owned_database_and_restores_method(tmp_path) -> None:
-    from dblib.connectors import file_copy
+    from dblib.systems.file_copy import connector as file_copy
 
     server = load_connector("file_copy", state_dir=tmp_path)
     conn = mock.MagicMock()
@@ -427,9 +426,9 @@ def test_dolt_cleanup_removes_dropped_database_trash(name, tmp_path) -> None:
     conn = mock.MagicMock()
     conn.cursor.return_value.__enter__.return_value.fetchone.return_value = None
     admin = (mock.patch.object(server, "_admin", return_value=conn) if name == "dolt"
-             else mock.patch("dblib.connectors.dolt_mysql.dolt_mysql.connect", return_value=conn))
+             else mock.patch("dblib.systems.dolt_mysql.connector.dolt_mysql.connect", return_value=conn))
     with mock.patch.object(server, "data_dir", tmp_path), admin, \
-            mock.patch("dblib.connectors.dolt_mysql.dolt_mysql.drop_database"):
+            mock.patch("dblib.systems.dolt_mysql.connector.dolt_mysql.drop_database"):
         assert server.exists("bb_test")
         server.delete("bb_test")
         assert not trash.exists()

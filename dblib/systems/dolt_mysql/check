@@ -1,0 +1,23 @@
+#!/bin/bash
+# Exit 0 only if the Dolt process that start launched is alive and the
+# adapter's port answers as a Dolt server, not some other MySQL.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+[ -f "$runs/dolt_mysql.pid" ] && kill -0 "$(cat "$runs/dolt_mysql.pid")" 2>/dev/null || exit 1
+
+"${PYTHON:-python3}" - <<'EOF'
+import os
+
+import pymysql
+
+conn = pymysql.connect(
+    host=os.environ.get("DOLT_MYSQL_HOST") or os.environ.get("DBFORK_SERVER_HOST", "127.0.0.1"),
+    port=int(os.environ.get("DOLT_MYSQL_PORT", "3306")),
+    user=os.environ.get("DOLT_MYSQL_USER", "root"),
+    password=os.environ.get("DOLT_MYSQL_PASSWORD", ""),
+    connect_timeout=2,
+)
+with conn, conn.cursor() as cur:
+    cur.execute("SELECT dolt_version()")
+EOF

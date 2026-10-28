@@ -1,6 +1,7 @@
 from unittest import mock
 
-from dblib import result_collector as rc, terminusdb
+from dblib import result_collector as rc
+from dblib.systems.terminusdb import adapter as terminusdb
 from dblib.connector import DatabaseHandle, load_connector
 from dblib.target import SuiteRequest
 from microbench import runner2

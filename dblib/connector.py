@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import importlib
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib import import_module
+from importlib.resources import files
 from pathlib import Path
 
 from dblib.target import PreparedTarget
@@ -82,14 +83,17 @@ class Connector(ABC):
 
 def connector_names() -> list[str]:
     """List built-in providers without importing their optional dependencies."""
-    return sorted(path.stem for path in (Path(__file__).parent / "connectors").glob("*.py")
-                  if not path.name.startswith("_"))
+    root = Path(str(files("dblib.systems")))
+    return sorted(path.name for path in root.iterdir()
+                  if path.is_dir() and not path.name.startswith("_")
+                  and (path / "connector.py").is_file())
 
 
 def load_connector(name: str, *, state_dir: Path | None = None) -> Connector:
     if name not in connector_names():
         raise ValueError(f"no built-in database connector named {name!r}")
-    return importlib.import_module(f"dblib.connectors.{name}").CONNECTOR(state_dir=state_dir)
+    module = import_module(f"dblib.systems.{name}.connector")
+    return module.CONNECTOR(state_dir=state_dir)
 
 
 def prepare_database(

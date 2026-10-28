@@ -1,0 +1,9 @@
+{
+  "system": "Tiger Cloud",
+  "proprietary": "yes",
+  "hosted": "yes",
+  "tuned": "no",
+  "tags": ["Postgres protocol", "Service forks"],
+  "requirements": "psql (libpq) on PATH. A runnable connector is not implemented.",
+  "credentials": ["TIGER_ACCESS_KEY", "TIGER_SECRET_KEY", "TIGER_PROJECT_ID"]
+}

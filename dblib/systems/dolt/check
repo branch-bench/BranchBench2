@@ -1,0 +1,25 @@
+#!/bin/bash
+# Exit 0 only if the Doltgres process that start launched is alive and the
+# adapter's port answers as a Dolt server, not some other Postgres.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+[ -f "$runs/dolt.pid" ] && kill -0 "$(cat "$runs/dolt.pid")" 2>/dev/null || exit 1
+
+"${PYTHON:-python3}" - <<'EOF'
+import os
+
+import psycopg2
+
+conn = psycopg2.connect(
+    host=os.environ.get("DOLT_HOST") or os.environ.get("DBFORK_SERVER_HOST", "localhost"),
+    port=int(os.environ.get("DOLT_PORT", "5432")),
+    user=os.environ.get("DOLT_USER", "postgres"),
+    password=os.environ.get("DOLT_PASSWORD", "password"),
+    dbname="postgres",
+    connect_timeout=2,
+)
+with conn, conn.cursor() as cur:
+    cur.execute("SELECT dolt_version()")
+conn.close()
+EOF

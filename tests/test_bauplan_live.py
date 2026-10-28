@@ -8,7 +8,7 @@ import itertools
 
 import pytest
 
-from dblib import bauplan as bp
+from dblib.systems.bauplan import adapter as bp
 from dblib import result_collector as rc
 
 DB = "bb_test_bauplan"

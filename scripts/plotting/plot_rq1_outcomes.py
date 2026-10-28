@@ -34,7 +34,8 @@ from plot_macro_cost import NAMES, SCENARIOS, _systems, load  # noqa: E402
 
 VERBS = ["BRANCH", "COMMIT", "DIFF", "SCHEMA_DIFF", "LOG", "MERGE", "REBASE", "RESET", "REVERT", "DELETE"]
 # In native-only mode these adapters switch to the engine's own primitive
-# instead of reporting the verb unsupported (dblib/seekdb.py, matrixone.py).
+# instead of reporting the verb unsupported (dblib/systems/seekdb/adapter.py,
+# dblib/systems/matrixone/adapter.py).
 NATIVE_SWITCH = {("SEEKDB", "merge"), ("MATRIXONE", "reset")}
 PASS, FAIL, NONE = "#d4ecd9", "#f6cdc8", "#f2f2f2"
 INK, MUTED = "#1f1f1f", "#6b6b6b"

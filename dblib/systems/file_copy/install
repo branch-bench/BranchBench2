@@ -1,0 +1,30 @@
+#!/bin/bash
+# Ensure PostgreSQL 18 is installed in one of the locations file_copy/start checks.
+set -euo pipefail
+
+if [ -x "/opt/homebrew/opt/postgresql@18/bin/postgres" ] \
+    || [ -x "/usr/local/opt/postgresql@18/bin/postgres" ] \
+    || [ -x "/usr/lib/postgresql/18/bin/postgres" ] \
+    || command -v postgres >/dev/null 2>&1; then
+    exit 0
+fi
+
+if [ "$(uname -s)" = "Linux" ] && command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update -y
+    sudo apt-get install -y curl ca-certificates gnupg lsb-release
+    sudo install -d /usr/share/postgresql-common/pgdg
+    sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+    codename="$(lsb_release -cs)"
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" \
+        | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+    sudo apt-get update -y
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18 postgresql-client-18
+    sudo systemctl stop postgresql || true
+    sudo systemctl disable postgresql || true
+    if [ -x "/usr/lib/postgresql/18/bin/postgres" ]; then
+        exit 0
+    fi
+fi
+
+echo "PostgreSQL 18 binary not found; install postgresql@18 or postgresql-18" >&2
+exit 1

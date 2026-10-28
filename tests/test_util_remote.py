@@ -45,7 +45,7 @@ def test_local_measurement_without_ssh(monkeypatch, tmp_path):
 def test_server_host_fallback(monkeypatch):
     monkeypatch.setenv("DBFORK_SERVER_HOST", "10.0.0.5")
     monkeypatch.delenv("SEEKDB_HOST", raising=False)
-    from dblib import seekdb as seekdb
+    from dblib.systems.seekdb import adapter as seekdb
     importlib.reload(seekdb)
     assert seekdb.SEEKDB_HOST == "10.0.0.5"
     monkeypatch.setenv("SEEKDB_HOST", "127.0.0.1")
@@ -74,8 +74,8 @@ def test_chronos_and_file_copy_hosts_can_differ(monkeypatch):
     monkeypatch.setenv("PGSQL_HOST", "10.0.0.5")
     monkeypatch.setenv("CHRONOS_HOST", "10.0.0.6")
     monkeypatch.setenv("FILE_COPY_HOST", "10.0.0.7")
-    from dblib import chronos as chronos
-    from dblib import file_copy as file_copy
+    from dblib.systems.chronos import adapter as chronos
+    from dblib.systems.file_copy import adapter as file_copy
     importlib.reload(chronos); importlib.reload(file_copy)
     assert chronos.PGSQL_HOST == "10.0.0.6" and file_copy.PGSQL_HOST == "10.0.0.7"
     for v in ("CHRONOS_HOST", "FILE_COPY_HOST", "PGSQL_HOST"):

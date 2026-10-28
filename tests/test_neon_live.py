@@ -7,7 +7,7 @@ import os
 import pytest
 
 from dblib import result_collector as rc
-from dblib import neon as neon
+from dblib.systems.neon import adapter as neon
 
 pytestmark = pytest.mark.skipif(os.environ.get("DBFORK_LIVE_TESTS") != "1" or not neon.API_KEY,
                                 reason="billable: needs DBFORK_LIVE_TESTS=1 and a Neon API key")

@@ -1,12 +1,27 @@
 # Add a database to BranchBench
 
-Implement database support in this repository first. The engine CLI must
-work without the leaderboard. Register the database with the leaderboard
-after maintainers publish the engine change.
+Submit the complete database integration in this repository. The engine CLI
+must work without the leaderboard. Maintainers publish it by updating the
+leaderboard's immutable engine pin after this pull request merges.
+
+Create one self-contained directory:
+
+```text
+dblib/systems/<system>/
+├── __init__.py
+├── adapter.py
+├── connector.py
+├── system.json
+├── README.md
+├── install          # optional
+├── start            # required for self-hosted systems
+├── check            # required for self-hosted systems
+└── stop             # required for self-hosted systems
+```
 
 ## 1. Implement the adapter
 
-Add `dblib/<system>.py`, using a lowercase system key with digits or underscores.
+Add `dblib/systems/<system>/adapter.py`, using a lowercase system key with digits or underscores.
 Subclass `DBToolSuite` from `dblib.db_api`. Implement the supported protected
 hooks, including connection management and storage measurement.
 
@@ -17,7 +32,7 @@ unsupported behavior. Reuse `dblib/mysql_common.py`, `dblib/pg_merge.py`, and
 
 ## 2. Implement the connector
 
-Add `dblib/connectors/<system>.py` and use the contract in `dblib/connector.py`.
+Add `dblib/systems/<system>/connector.py` and use the contract in `dblib/connector.py`.
 Follow a working connector for the same protocol.
 
 The connector supplies these operations:
@@ -29,12 +44,16 @@ The connector supplies these operations:
 - Report the connection scope and provider version without secrets.
 - Check hosted account access before provisioning, when applicable.
 
-Export the connector class as `CONNECTOR`. The engine discovers modules in
-`dblib/connectors/` without a separate registry table. Its loader creates a
+Export the connector class as `CONNECTOR`. The engine discovers complete
+packages in `dblib/systems/` without a separate registry table. Its loader creates a
 connector with a caller-selected recovery directory. Preserve cleanup errors
 and recovery information. Validate database identifiers before using them in
 provider calls. Read credentials from the process environment only.
-Fetch secrets from Bitwarden at point of use.
+
+Add `system.json` and a README to the same directory. For a self-hosted
+database, add `start`, `check`, and `stop`. Add `install` only when the runner
+must install the server. Lifecycle scripts receive `DBFORK_STATE_DIR` and must
+store their PID and recovery files there.
 
 ## 3. Verify engine use
 
@@ -58,23 +77,14 @@ Then run an appropriate workload against a disposable database using
 unsupported operations, work counts, and cleanup. A `completed` status
 alone does not prove that every unit succeeded.
 
-Submit the adapter, discoverable connector, tests, and required dependency
-changes in an engine PR. State which checks used a live database.
+Submit the complete system package, tests, and required dependency changes in
+one engine PR. State which checks used a live database.
 
-## 4. Register with the leaderboard
+## 4. Publication
 
-After the engine commit is published, open a separate PR in
-[BranchBench2-Leaderboard](https://github.com/branch-bench/BranchBench2-Leaderboard).
-
-1. Pin the published engine commit in `pyproject.toml` and update `uv.lock`.
-2. Add `leaderboard/systems/<system>/system.json` and setup instructions.
-3. For self-hosted systems, add server `start`, `check`, and `stop` scripts.
-   Add `install` when the server needs installation.
-4. Verify the leaderboard run and generated site. Do not copy adapters or
-   connectors into the leaderboard repository.
-
-Submit code and registration metadata, not workstation timing JSON.
-A maintainer merge that changes exactly one self-hosted system can trigger
-the configured alpha workflow. An engine merge alone does not trigger it.
-For an engine-pin-only update, maintainers select the system through manual
-workflow dispatch. Alpha timings are not calibrated production rankings.
+The database maker does not change the leaderboard repository. After the
+engine PR merges, a maintainer opens a mechanical pull request that updates
+the leaderboard's engine pin and lockfile. The leaderboard reads metadata and lifecycle
+resources from the pinned engine package. The maintainer then starts alpha
+through manual workflow dispatch. Alpha timings are not calibrated production
+rankings.

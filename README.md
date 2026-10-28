@@ -56,14 +56,13 @@ Use a disposable benchmark database. The microbench and macrobench CLIs honor `d
 and the configured database source. Keep `cleanup: false` when you need to
 retain the database. `cleanup: true` can delete an existing database too.
 The workload can change its contents. Hosted providers also need credentials in the process
-environment. Fetch secrets from Bitwarden at point of use; do not save them
-in configuration files.
+environment. Do not save secrets in configuration files.
 
 ### Repository Layout
 
 ```
-dblib/              # DB API, concrete adapters, prepared targets, result collection
-dblib/connectors/   # Provider database creation, loading, target factories and deletion
+dblib/              # Shared DB API, prepared targets and result collection
+dblib/systems/      # Self-contained database adapters, connectors, metadata and lifecycle
 microbench/         # Microbenchmark runner, its operations, and the branch-verb grid
 macrobench/         # Macrobenchmark scenarios, schema generators, configs and runner
 util/               # Shared helpers (SQL loading, DB utilities)
@@ -133,7 +132,8 @@ protobuf modules. `build_protos.py` compiles the `.proto` files with
 ## Database API
 
 `dblib/db_api.py` defines `DBToolSuite`, the adapter base class every
-database system implements. Built-in adapters live in `dblib/<system>.py`. An
+database system implements. Built-in adapters live in
+`dblib/systems/<system>/adapter.py`. An
 adapter overrides the protected hooks it supports (`_branch_impl`,
 `_commit_impl`, ..., `_storage_bytes`, `_connect_impl`, `_flush_impl`); the
 public verbs wrap them with timing, storage measurement and result recording.
@@ -628,6 +628,6 @@ See [Result rows](#result-rows); the authoritative definition is
 - **Scenario configurations**: See `macrobench/configs/` and `macrobench/task.proto`
 - **Microbenchmark config**: See `microbench/test_config2.textproto` and `microbench/task2.proto`
 - **Database schemas and dataset**: See `db_setup/` and `macrobench/schema/`
-- **Database adapters and connectors**: `dblib/<system>.py` and `dblib/connectors/<system>.py`
+- **Database integrations**: `dblib/systems/<system>/`
 - **Adding a database**: [CONTRIBUTING.md](CONTRIBUTING.md)
-- **Leaderboard server scripts and registration**: the leaderboard repository, `leaderboard/systems/<system>/`
+- **Leaderboard publication**: the leaderboard repository pins an immutable engine revision and reads these integrations from it

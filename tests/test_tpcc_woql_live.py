@@ -14,7 +14,9 @@ from decimal import Decimal
 import psycopg2
 import pytest
 
-from dblib import file_copy, result_collector as rc, terminusdb
+from dblib import result_collector as rc
+from dblib.systems.file_copy import adapter as file_copy
+from dblib.systems.terminusdb import adapter as terminusdb
 from macrobench import tpcc, tpcc_woql
 from macrobench.datagen.ch import CHGenerator, CHScale
 

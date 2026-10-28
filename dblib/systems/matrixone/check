@@ -1,0 +1,28 @@
+#!/bin/bash
+# Exit 0 only if the MatrixOne process that start launched is alive and the
+# adapter's port answers as a MatrixOne server.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+[ -f "$runs/matrixone.pid" ] && kill -0 "$(cat "$runs/matrixone.pid")" 2>/dev/null || exit 1
+
+"${PYTHON:-python3}" - <<'EOF'
+import os
+import sys
+
+import pymysql
+
+conn = pymysql.connect(
+    host=os.environ.get("MO_HOST", "127.0.0.1"),
+    port=int(os.environ.get("MO_PORT", "6001")),
+    user=os.environ.get("MO_USER", "root"),
+    password=os.environ.get("MO_PASSWORD", "111"),
+    autocommit=True,
+    connect_timeout=2,
+)
+with conn, conn.cursor() as cur:
+    cur.execute("SELECT version()")
+    version = str(cur.fetchone()[0])
+    if "MatrixOne" not in version:
+        sys.exit(1)
+EOF

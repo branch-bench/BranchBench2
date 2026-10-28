@@ -1,0 +1,46 @@
+#!/bin/bash
+# Exit 0 only if the PostgreSQL process that start launched is alive and the
+# adapter's port answers as a PostgreSQL server.
+set -euo pipefail
+
+runs="${DBFORK_STATE_DIR:?DBFORK_STATE_DIR is required}"
+[ -f "$runs/file_copy.pid" ] && kill -0 "$(cat "$runs/file_copy.pid")" 2>/dev/null || exit 1
+
+"${PYTHON:-python3}" - <<'EOF'
+import os
+
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+
+host = os.environ.get("FILE_COPY_HOST") or os.environ.get("PGSQL_HOST") or os.environ.get("DBFORK_SERVER_HOST", "localhost")
+port = int(os.environ.get("FILE_COPY_PORT") or os.environ.get("PGSQL_PORT", "5433"))
+password = os.environ.get("PGSQL_PASSWORD", "")
+target_user = os.environ.get("PGSQL_USER", "elaineang")
+bootstrap_users = []
+for u in (os.environ.get("USER"), target_user, "postgres"):
+    if u and u not in bootstrap_users:
+        bootstrap_users.append(u)
+
+conn = None
+for u in bootstrap_users:
+    try:
+        conn = psycopg2.connect(host=host, port=port, user=u, password=password, dbname="postgres", connect_timeout=2)
+        break
+    except psycopg2.OperationalError:
+        continue
+if conn is None:
+    raise SystemExit(1)
+
+conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+with conn.cursor() as cur:
+    cur.execute("SELECT current_setting('server_version')")
+    for role in ("postgres", target_user):
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+        if cur.fetchone() is None:
+            cur.execute(sql.SQL("CREATE ROLE {} WITH SUPERUSER LOGIN").format(sql.Identifier(role)))
+conn.close()
+
+conn = psycopg2.connect(host=host, port=port, user=target_user, password=password, dbname="postgres", connect_timeout=2)
+conn.close()
+EOF

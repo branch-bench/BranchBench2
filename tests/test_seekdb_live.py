@@ -6,7 +6,7 @@ import socket
 import pytest
 
 from dblib import result_collector as rc
-from dblib import seekdb as seekdb
+from dblib.systems.seekdb import adapter as seekdb
 
 DB = "bb_test_seekdb"
 

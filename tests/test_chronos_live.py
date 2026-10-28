@@ -5,7 +5,7 @@ Exercises every verb through the public API plus the SQL shim."""
 import pytest
 
 from dblib import result_collector as rc
-from dblib import chronos as chronos
+from dblib.systems.chronos import adapter as chronos
 
 DB = "bb_test_chronos"
 MAIN = chronos.MAIN_BRANCH

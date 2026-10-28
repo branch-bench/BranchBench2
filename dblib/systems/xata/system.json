@@ -1,0 +1,9 @@
+{
+  "system": "Xata",
+  "proprietary": "yes",
+  "hosted": "yes",
+  "tuned": "no",
+  "tags": ["Postgres protocol", "Copy-on-write branches"],
+  "requirements": "psql (libpq) on PATH.",
+  "credentials": ["XATA_API_KEY", "XATA_ORGANIZATION_ID"]
+}
