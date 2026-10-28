@@ -16,6 +16,7 @@ class Dolt(Connector):
     needs_psql = False
     version_sql = "SELECT dolt_version()"
     data_dir = Path(dolt_mysql.DOLT_MYSQL_DATA_DIR)
+    suite_type = dolt_mysql.DoltMySQLToolSuite
 
     def scope(self) -> dict:
         return {"host": dolt_mysql.DOLT_MYSQL_HOST, "port": dolt_mysql.DOLT_MYSQL_PORT,
@@ -33,14 +34,14 @@ class Dolt(Connector):
 
     def prepare_target(self, database: DatabaseHandle) -> PreparedTarget:
         def open_suite(request: SuiteRequest):
-            return dolt_mysql.DoltMySQLToolSuite.init_for_bench(
+            return self.suite_type.init_for_bench(
                 request.result_collector,
                 database.name,
                 request.initial_ref,
                 request.measure_storage,
             )
 
-        return PreparedTarget(database.root_ref, dolt_mysql.DoltMySQLToolSuite, open_suite)
+        return PreparedTarget(database.root_ref, self.suite_type, open_suite)
 
     def delete(self, db: str) -> None:
         dolt_mysql.drop_database(db)
