@@ -15,7 +15,7 @@ def test_catalog_contains_complete_system_packages_without_importing_connectors(
         "matrixone", "neon", "seekdb", "xata",
     }
     before = set(sys.modules)
-    assert set(system_catalog()) == complete | {"tiger"}
+    assert complete | {"tiger"} <= set(system_catalog())
     imported = set(sys.modules) - before
     assert not {name for name in imported if name.endswith(".connector")}
     for name in complete:

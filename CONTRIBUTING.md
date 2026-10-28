@@ -1,8 +1,8 @@
 # Add a database to BranchBench
 
 Submit the complete database integration in this repository. The engine CLI
-must work without the leaderboard. Maintainers publish it by updating the
-leaderboard's immutable engine pin after this pull request merges.
+must work without the leaderboard. After the merge, the leaderboard follows
+engine `main` automatically and publishes the alpha result.
 
 Create one self-contained directory:
 
@@ -82,9 +82,9 @@ one engine PR. State which checks used a live database.
 
 ## 4. Publication
 
-The database maker does not change the leaderboard repository. After the
-engine PR merges, a maintainer opens a mechanical pull request that updates
-the leaderboard's engine pin and lockfile. The leaderboard reads metadata and lifecycle
-resources from the pinned engine package. The maintainer then starts alpha
-through manual workflow dispatch. Alpha timings are not calibrated production
-rankings.
+The database maker does not change the leaderboard repository. The leaderboard
+checks engine `main` every five minutes. When it has moved, the leaderboard
+commits the new engine pin and lockfile, benchmarks the changed self-hosted
+systems on a fresh EC2 worker, and publishes their results to the alpha site.
+Hosted systems need a separately configured run. Alpha timings are not
+calibrated production rankings.

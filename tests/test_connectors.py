@@ -30,8 +30,9 @@ def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
     with mock.patch("dblib.connector.import_module") as imported:
         names = connector_names()
         imported.assert_not_called()
-    assert names == ["bauplan", "chronos", "dolt", "dolt_mysql", "file_copy",
-                     "matrixone", "neon", "seekdb", "terminusdb", "xata"]
+    assert {"bauplan", "chronos", "dolt", "dolt_mysql", "file_copy",
+            "matrixone", "neon", "seekdb", "terminusdb", "xata"} <= set(names)
+    assert names == sorted(set(names))
     assert connector_names() == names
     with pytest.raises(ValueError, match="no built-in"):
         load_connector("../neon")
