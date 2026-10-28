@@ -7,9 +7,7 @@ from unittest import mock
 import pytest
 from psycopg2.errors import DuplicateDatabase
 
-from dblib import result_collector as rc
 from dblib.connector import Connector, DatabaseHandle, connector_names, load_connector, prepared_database
-from dblib.target import SuiteRequest
 from microbench import task2_pb2 as tp
 
 
@@ -32,7 +30,7 @@ def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
     with mock.patch("dblib.connector.import_module") as imported:
         names = connector_names()
         imported.assert_not_called()
-    assert names == ["bauplan", "chronos", "dolt", "dolt_mysql", "file_copy", "inkeun_demo_db",
+    assert names == ["bauplan", "chronos", "dolt", "dolt_mysql", "file_copy",
                      "matrixone", "neon", "seekdb", "terminusdb", "xata"]
     assert connector_names() == names
     with pytest.raises(ValueError, match="no built-in"):
@@ -43,23 +41,6 @@ def test_loader_is_lazy_and_returns_fresh_connectors(tmp_path) -> None:
         assert isinstance(first, Connector)
         assert first is not second
         assert first.state_dir == tmp_path
-
-
-def test_inkeun_demo_db_uses_a_distinct_backend_identity() -> None:
-    from dblib.systems.inkeun_demo_db.adapter import InkeunDemoDBToolSuite
-
-    server = load_connector("inkeun_demo_db")
-    database = DatabaseHandle("bb_test", "main")
-    request = SuiteRequest(rc.ResultCollector(), "main", 0, measure_storage=True)
-    target = server.prepare_target(database)
-
-    with mock.patch.object(InkeunDemoDBToolSuite, "init_for_bench",
-                           return_value=mock.sentinel.suite) as init:
-        assert target.open_suite(request) is mock.sentinel.suite
-
-    assert target.suite_type is InkeunDemoDBToolSuite
-    assert target.suite_type.BACKEND_NAME == "inkeun_demo_db"
-    init.assert_called_once_with(request.result_collector, "bb_test", "main", True)
 
 
 @pytest.mark.parametrize("name", ["", "db;DROP TABLE x", "../db", "MixedCase", "x" * 64])

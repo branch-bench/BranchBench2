@@ -11,7 +11,7 @@ from dblib.systems import load_system, system_catalog, system_dir
 
 def test_catalog_contains_complete_system_packages_without_importing_connectors() -> None:
     complete = {
-        "chronos", "dolt", "dolt_mysql", "file_copy", "inkeun_demo_db",
+        "chronos", "dolt", "dolt_mysql", "file_copy",
         "matrixone", "neon", "seekdb", "xata",
     }
     before = set(sys.modules)

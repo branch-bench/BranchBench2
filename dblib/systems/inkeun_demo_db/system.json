@@ -1,9 +1,0 @@
-{
-  "system": "inkeun-demo-db",
-  "proprietary": "no",
-  "hosted": "no",
-  "tuned": "no",
-  "tags": ["Alpha demo", "MySQL protocol", "Git-style branches"],
-  "requirements": "Installer supplied for the alpha demo.",
-  "credentials": []
-}
