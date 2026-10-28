@@ -73,8 +73,9 @@ class ReadOperation(Operation):
 class InsertOperation(Operation):
     """Insert a new row into the table.
 
-    Generates a new row with fake data and inserts it. Retries a few times
-    if there are primary key collisions.
+    Generates a new row with fake data and inserts it. A single integer key
+    counts up from the table's maximum, so it never collides; any other key
+    shape is retried a few times on a collision.
     """
 
     def __init__(self, table_name: str):
@@ -107,6 +108,8 @@ class InsertOperation(Operation):
         inserted = False
         for attempt in range(5):
             row_data = context.generate_row(self.table_name)
+            if len(pk_columns) == 1 and isinstance(row_data[pk_columns[0]], int):
+                row_data[pk_columns[0]] = context.next_insert_key(self.table_name, pk_columns[0])
             pk_tuple = tuple(row_data[pk] for pk in pk_columns)
 
             try:
@@ -131,6 +134,8 @@ class InsertOperation(Operation):
         inserted = False
         for attempt in range(5):
             row_data = context.generate_row(self.table_name)
+            if len(pk_columns) == 1 and isinstance(row_data[pk_columns[0]], int):
+                row_data[pk_columns[0]] = await context.next_insert_key_async(self.table_name, pk_columns[0])
             pk_tuple = tuple(row_data[pk] for pk in pk_columns)
 
             try:

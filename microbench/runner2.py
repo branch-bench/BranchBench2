@@ -603,6 +603,7 @@ class WorkerContext:
         self._pk_columns: List[str] = []
         self._existing_pks: List[Tuple] = []
         self._modified_keys: Dict[str, List[Tuple]] = {}
+        self._insert_keys: Dict[str, int] = {}  # per table, the last integer key this worker inserted
 
         # Index tracking for DDL operations
         self._created_indexes: Dict[str, List[str]] = {}  # table -> [index_names]
@@ -732,6 +733,27 @@ class WorkerContext:
             table_schema = self.db_tools.get_table_schema(table_name)
             self._table_datagen = DynamicDataGenerator(table_schema)
         return self._table_datagen.generate_row()
+
+    # Integer keys count up from the table's maximum, interleaved by worker, so a generated insert never
+    # collides with a row. A collision would be retried, and the retried statement would stay in the results
+    # as a failed call that disqualifies the whole batch.
+    def next_insert_key(self, table_name: str, column: str) -> int:
+        if table_name not in self._insert_keys:
+            self._seed_insert_keys(table_name, self.run_sql(f"SELECT MAX({column}) FROM {table_name}", timed=False))
+        return self._take_insert_key(table_name)
+
+    async def next_insert_key_async(self, table_name: str, column: str) -> int:
+        if table_name not in self._insert_keys:
+            self._seed_insert_keys(table_name, await self.run_sql_async(f"SELECT MAX({column}) FROM {table_name}", timed=False))
+        return self._take_insert_key(table_name)
+
+    def _seed_insert_keys(self, table_name: str, rows) -> None:
+        top = rows[0][0] if rows and rows[0][0] is not None else 0
+        self._insert_keys[table_name] = int(top) + self.thread_id
+
+    def _take_insert_key(self, table_name: str) -> int:
+        self._insert_keys[table_name] += self.config.num_threads  # worker t takes top + t + n, top + t + 2n, ...
+        return self._insert_keys[table_name]
 
     def track_modified_key(self, key: Tuple) -> None:
         """Track a modified primary key."""
