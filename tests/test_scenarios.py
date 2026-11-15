@@ -90,4 +90,7 @@ def test_scenario_runs_to_completion_on_fake_backend(key):
         assert summary["passed"] >= 1
         # Every branch the scenario made was deleted again.
         assert suite.list_branches() == ["main"], suite.list_branches()
+        # A completed scenario records exactly the work units it announced.
+        work = ctx.work.summary()
+        assert (work["succeeded"], work["failed"], work["skipped"]) == (scenario.total_units(), 0, 0), work
     assert summary["failed"] == 0, [r for r in summary["results"] if r["passed"] is False]

@@ -206,11 +206,11 @@ class OpsAgentScenario(Scenario):
                 ctx.add_metric("time_to_recovery_sec" + sfx, round(time.time() - t_start, 3))
                 ctx.tick()
 
-                # 4. Delete the investigation branches.
+                # 4. Delete the investigation branches. Cleanup is not a work
+                # unit: total_units() counts commits, investigations and resets.
                 for f in findings:
                     if isinstance(f, dict):
                         ctx.delete(suite, f["branch"], label="investigation_delete")
-                        ctx.tick()
                 # The next incident needs the spine back at a pre-fault state;
                 # otherwise its deploys run on the fault's schema and its
                 # checks would be vacuous, so it is reported as not applicable.
