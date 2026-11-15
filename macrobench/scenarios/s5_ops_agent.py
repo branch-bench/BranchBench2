@@ -76,16 +76,27 @@ class OpsAgentScenario(Scenario):
         if p.commits_per_incident and p.fault_commit_offset >= p.commits_per_incident:
             raise ValueError("ops_agent.fault_commit_offset must be below commits_per_incident")
 
-    def _incidents(self) -> tuple:
-        """(number of incidents, commits per incident, branches per incident)."""
+    def _incidents(self) -> list:
+        """(commits, investigation branches) of each incident. An incident
+        investigates one branch per commit of its history window, at most its
+        share of ``investigation_branches``. The window holds the commits before
+        the incident's last one, only the latest ``history_offset`` of them when
+        that is set, and the single commit of a one-commit incident."""
         p = self.params
         cpi = p.commits_per_incident or p.spine_commits
         n = -(-p.spine_commits // cpi)
-        return n, cpi, max(1, p.investigation_branches // n)
+        share = max(1, p.investigation_branches // n)
+        plan = []
+        for i in range(n):
+            commits = min(cpi, p.spine_commits - i * cpi)
+            earlier = commits - 1
+            window = min(p.history_offset, earlier) if p.history_offset > 0 else earlier
+            plan.append((commits, min(share, max(1, window))))
+        return plan
 
     def total_units(self) -> int:
-        n, _, per = self._incidents()
-        return self.params.spine_commits + n * per + n
+        """One unit per spine commit, per investigation and per reset."""
+        return sum(commits + branches + 1 for commits, branches in self._incidents())
 
     # ------------------------------------------------------------------
 
@@ -94,15 +105,15 @@ class OpsAgentScenario(Scenario):
         suite = ctx.new_suite()
         rng = ctx.rng
         every = p.commit_every_txns or DEFAULT_COMMIT_EVERY_TXNS
-        incidents, cpi, per_inc = self._incidents()
+        plan = self._incidents()
+        incidents = len(plan)
         self._deploy_ks = set()     # routine deploys on the spine (survivors of resets)
         k = 0
         next_commit_at = every
         prev_why = None             # why the previous incident left the spine unrestored
         load_stopped = False
         try:
-            for inc in range(1, incidents + 1):
-                n_commits = min(cpi, p.spine_commits - k)
+            for inc, (n_commits, n_branches) in enumerate(plan, 1):
                 tag = f" (incident {inc})" if incidents > 1 else ""
                 bad_version = BAD_VERSION if incidents == 1 else f"{BAD_VERSION}-{inc}"
                 if prev_why is not None:
@@ -113,7 +124,7 @@ class OpsAgentScenario(Scenario):
                               "S5.4 dropped column's values restored by the reset"):
                         inv.not_applicable(n + tag, why)
                     ctx.note(f"incident {inc} not run: {why}")
-                    ctx.tick(n_commits + per_inc + 1, outcome="skipped")
+                    ctx.tick(n_commits + n_branches + 1, outcome="skipped")
                     k += n_commits
                     next_commit_at += every * n_commits
                     continue
@@ -162,7 +173,7 @@ class OpsAgentScenario(Scenario):
                 window = commits[-(p.history_offset + 1):-1] if p.history_offset > 0 else commits[:-1]
                 if not window:
                     window = commits[:-1] or commits
-                n = min(per_inc, len(window))
+                n = min(n_branches, len(window))
                 picks = [window[int(i * (len(window) - 1) / max(1, n - 1))] for i in range(n)] if n > 1 else [window[-1]]
                 picks = sorted(set(picks))
                 findings = ctx.run_workers(

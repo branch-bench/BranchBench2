@@ -40,24 +40,37 @@ CONFIGS = {
         workload { branch_ops { commit_interval: 1 }
                    data_ops { statements_per_step: 2 rows_per_write: 2 }
                    ops_agent { spine_commits: 5 fault_commit_offset: 2 investigation_branches: 2 history_offset: 4 } }""",
+    # The history window holds two commits, fewer than the four requested branches.
+    "ops_agent/short_window": MINI_SCHEMA + """
+        workload { branch_ops { commit_interval: 1 }
+                   data_ops { statements_per_step: 2 rows_per_write: 2 }
+                   ops_agent { spine_commits: 5 fault_commit_offset: 2 investigation_branches: 4 history_offset: 2 } }""",
+    # The last of three incidents has two commits, so it investigates one branch, not two.
+    "ops_agent/short_last_incident": MINI_SCHEMA + """
+        workload { branch_ops { commit_interval: 1 }
+                   data_ops { statements_per_step: 2 rows_per_write: 2 }
+                   ops_agent { spine_commits: 10 commits_per_incident: 4 fault_commit_offset: 1 investigation_branches: 6
+                               history_offset: 3 } }""",
     "data_agent": MINI_SCHEMA + """
         workload { branch_ops { commit_interval: 1 }
                    data_ops { statements_per_step: 2 rows_per_write: 2 write_fraction: 0.8 }
                    data_agent { batches: 2 concurrent_batches: 1 batch_rows: 4 days_back: 2 steps_per_batch: 2 resets_per_batch: 1 } }""",
 }
+# The first incident's one-commit history window lies after its bad deploy, so the
+# reset cannot restore the spine and the second incident is skipped.
+SKIPPED_INCIDENT = MINI_SCHEMA + """
+    workload { branch_ops { commit_interval: 1 }
+               data_ops { statements_per_step: 2 rows_per_write: 2 }
+               ops_agent { spine_commits: 12 commits_per_incident: 6 fault_commit_offset: 5 investigation_branches: 4
+                           history_offset: 1 } }"""
 
 NEEDS_MERGE = {"context_mgmt", "multi_agent", "dev_agent", "data_agent"}
 
 
-def _config(key: str) -> tp.MacroBenchConfig:
+def _prepared(scenario_key: str, text: str):
+    """One scenario config on a seeded fake backend, ready to run."""
     cfg = tp.MacroBenchConfig()
-    text_format.Parse('run_id: "t" seed: 7 ' + CONFIGS[key], cfg)
-    return cfg
-
-
-@pytest.mark.parametrize("key", sorted(CONFIGS))
-def test_scenario_runs_to_completion_on_fake_backend(key):
-    cfg = _config(key)
+    text_format.Parse('run_id: "t" seed: 7 ' + text, cfg)
     collector = rc.ResultCollector()
     suite = FakeSuite(collector)
     inv = InvariantRecorder()
@@ -65,14 +78,21 @@ def test_scenario_runs_to_completion_on_fake_backend(key):
                           spine="main", invariants=inv, log=lambda m: None)
     scenario = create_scenario(ctx)
     scenario.validate()
-    stats = schema.apply_schema(suite, "main", cfg.schema, key, log=lambda m: None)
+    stats = schema.apply_schema(suite, "main", cfg.schema, scenario_key, log=lambda m: None)
     assert stats["failed"] == []
     if cfg.schema.base == tp.BaseSchema.CH_BENCH:
         seed_ch(suite, "main", CHScale.from_config(cfg.schema), log=lambda m: None)
     scenario.seed(suite)
     suite.commit("main", "seed", timed=False)
+    return ctx, scenario, suite, inv, collector
 
-    if key in NEEDS_MERGE:
+
+@pytest.mark.parametrize("key", sorted(CONFIGS))
+def test_scenario_runs_to_completion_on_fake_backend(key):
+    scenario_key = key.partition("/")[0]  # "ops_agent/short_window" is one more ops_agent config
+    ctx, scenario, suite, inv, collector = _prepared(scenario_key, CONFIGS[key])
+
+    if scenario_key in NEEDS_MERGE:
         with pytest.raises(UnsupportedOperationAbort):
             scenario.run()
         support = collector.support_summary()
@@ -81,6 +101,9 @@ def test_scenario_runs_to_completion_on_fake_backend(key):
         assert any(op.startswith(("MERGE", "REBASE", "REVERT")) for op in support["unsupported_ops"])
         assert ctx.unsupported_abort.split(":")[0] in ("MERGE", "REBASE", "REVERT"), ctx.unsupported_abort
         assert ctx.stop_event.is_set()
+        # A scenario that stops early never records more work than it announced.
+        work = ctx.work.summary()
+        assert work["failed"] == 0 and work["succeeded"] + work["skipped"] <= scenario.total_units(), work
     else:
         scenario.run()  # must not raise
         support = collector.support_summary()
@@ -94,3 +117,13 @@ def test_scenario_runs_to_completion_on_fake_backend(key):
         work = ctx.work.summary()
         assert (work["succeeded"], work["failed"], work["skipped"]) == (scenario.total_units(), 0, 0), work
     assert summary["failed"] == 0, [r for r in summary["results"] if r["passed"] is False]
+
+
+def test_ops_agent_counts_a_skipped_incident_like_one_that_ran():
+    ctx, scenario, suite, inv, _ = _prepared("ops_agent", SKIPPED_INCIDENT)
+    scenario.run()
+    work = ctx.work.summary()
+    assert work["skipped"] > 0 and work["failed"] == 0, work
+    assert work["succeeded"] + work["skipped"] == scenario.total_units(), work
+    assert inv.summary()["failed"] == 0
+    assert suite.list_branches() == ["main"], suite.list_branches()
