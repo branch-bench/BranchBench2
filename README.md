@@ -40,7 +40,7 @@ Requirements: [uv](https://docs.astral.sh/uv/) and Docker (with Compose).
 
 ```bash
 # 1. Python 3.13 and the dependencies, into .venv (compiles the .proto files)
-uv sync                                 # add --extra chronos for Chronos, --extra plotting for the plots
+uv sync          # add --extra chronos for Chronos, --extra plotting for the plots, --extra mcp for the MCP server
 
 # 2. A server to run against (Doltgres here; see docker-compose.yml for the others)
 docker compose up -d --wait doltgres
@@ -97,6 +97,7 @@ records it.
 | [guides/api.md](guides/api.md) | The Python API: branch operations, refs, `exec()`, conflict resolution, result rows |
 | [guides/macrobench.md](guides/macrobench.md) | The six scenarios, their configuration and intensity knobs, running them, storage measurement |
 | [guides/adding_a_scenario.md](guides/adding_a_scenario.md) | Writing a new scenario: the class, its parameters and checks, tables, configs, tests |
+| [guides/agents.md](guides/agents.md) | Running an LLM agent on a branchable database: the tools, guardrails, and the MCP server |
 | [guides/microbench.md](guides/microbench.md) | The per-operation microbenchmark, the single-operation runner and the latency/throughput scripts |
 | [guides/backends.md](guides/backends.md) | Every backend, what it supports, Docker Compose; each system's own README has its setup |
 | [guides/embedding.md](guides/embedding.md) | Calling the runners from another application through `PreparedTarget` |

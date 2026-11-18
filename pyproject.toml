@@ -32,6 +32,9 @@ plotting = ["matplotlib", "numpy", "pandas>=2.3,<3", "scipy"]
 chronos = [
     "chronos-core @ git+https://github.com/mitdbg/chronos@607418d4d06ba1a67be0e9e5a7617132f265a87c#subdirectory=packages/chronos-core",
 ]
+mcp = [
+    "mcp>=1.20,<2",
+]
 
 [dependency-groups]
 dev = ["pytest"]
