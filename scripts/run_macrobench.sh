@@ -8,7 +8,7 @@
 #       <scenario> <backend> [scale_factor]
 #
 # Arguments:
-#   scenario      rl_env | context_mgmt | multi_agent | dev_agent | ops_agent | data_agent
+#   scenario      a registered scenario key (python -m macrobench.scenarios --list)
 #   backend       dolt | dolt_mysql | seekdb | matrixone | bauplan | neon | xata | file_copy | chronos
 #   scale_factor  W warehouses for the generated CH-benCHmark data (default: the config's)
 #
@@ -77,7 +77,7 @@ done
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
     echo "Usage: $0 [--mini] [--outdir DIR] [--max-runtime-sec N] [--op-stall-sec N] [--measure-storage] [--native-only] [--storage-sample-interval SEC] [--branch-intensity X] [--data-intensity Y] [--seed N] <scenario> <backend> [scale_factor]"
-    echo "  scenario:  rl_env | context_mgmt | multi_agent | dev_agent | ops_agent | data_agent"
+    echo "  scenario:  $( (cd "$REPO" && uv run -q python -m macrobench.scenarios --list --examples) | tr '\n' ' ')"
     echo "  backend:   dolt | dolt_mysql | seekdb | matrixone | bauplan | neon | xata | file_copy | chronos"
     exit 1
 fi
@@ -86,7 +86,8 @@ SCENARIO="$1"
 BACKEND="$2"
 SCALE="${3:-}"
 
-VALID_SCENARIOS="rl_env context_mgmt multi_agent dev_agent ops_agent data_agent"
+# The registered scenarios (examples included, so the template can be run by name).
+VALID_SCENARIOS="$( (cd "$REPO" && uv run -q python -m macrobench.scenarios --list --examples) | tr '\n' ' ')"
 if ! echo "$VALID_SCENARIOS" | grep -qw "$SCENARIO"; then
     echo "Error: invalid scenario '$SCENARIO' (one of: $VALID_SCENARIOS)"
     exit 1

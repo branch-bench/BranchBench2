@@ -35,8 +35,10 @@ candidate so far (so the rebase replayed the later cycles' compaction
 commits and earlier rejections survived) plus the alternatives of the
 rejected cycles.
 """
+from dataclasses import dataclass
 
 from macrobench.scenarios.base import Scenario, register
+from macrobench.scenarios.params import param
 
 STRATEGIES = ["summarize", "reference", "dedup"]
 INDEX_COLUMNS = {"summarize": "(step)", "reference": "(session_id, step)",
@@ -48,6 +50,18 @@ LETTERS = "ABCDEFGHIJ"
 class ContextMgmtScenario(Scenario):
     key = "context_mgmt"
     name = "S2 context management"
+
+    order = 2
+    label, plot_label, title = "S2 context mgmt", "S2\ncontext", "S2 context management"
+    marker, group = ("v", "#937860"), "branch"
+
+    @dataclass
+    class Params:
+        compaction_interval: int = param(0, intensity="data", doc="interaction steps between compactions")
+        fanout: int = param(0, intensity="branch", cap=10, doc="candidate branches per compaction (at most 10)")
+        compaction_cycles: int = param(0, intensity="branch", doc="compaction points")
+        rejected_cycle: int = param(0, doc="1-based cycle (within each block) whose choice is later rejected; 0 = never")
+        cycles_per_rejection: int = param(0, doc="cycles per block, one rejection per block; 0 = one rejection at the end")
 
     def validate(self):
         p = self.params

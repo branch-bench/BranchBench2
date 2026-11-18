@@ -33,9 +33,11 @@ the note_<step> columns it added; indexes are not part of the schema half of a d
 """
 
 import random
+from dataclasses import dataclass
 
 from macrobench import faults
 from macrobench.scenarios.base import Scenario, ScenarioStopped, Worker, register
+from macrobench.scenarios.params import param
 
 KEEP_SENTINEL_BASE = 100_000
 PATH_SENTINEL_BASE = 200_000
@@ -49,6 +51,25 @@ def sentinel_name(task_id: int) -> str:
 class RlEnvScenario(Scenario):
     key = "rl_env"
     name = "S1 RL environment"
+
+    order = 1
+    label, plot_label, title = "S1 RL env", "S1\nRL env", "S1 RL env (data-heavy)"
+    marker, group = ("o", "#4c72b0"), "data"
+
+    @dataclass
+    class Params:
+        tasks: int = param(0, intensity="branch", doc="T: task states (one branch each)")
+        group_size: int = param(0, intensity="branch", cap=32, doc="G: rollout leaves per task (a GRPO group)")
+        step_budget: int = param(0, intensity="data", doc="S: maximum trajectory length (steps)")
+        rollouts_per_round: int = param(0, doc="rollouts launched per round (0 = G); rounds repeat until G leaves exist")
+        historical_fork_prob: float = param(0.0, doc="probability a rollout forks from a recorded step instead of the task commit")
+
+    @classmethod
+    def after_intensity(cls, params, changed):
+        # Rounds never exceed the (capped) group.
+        if params.rollouts_per_round > params.group_size:
+            changed["rl_env.rollouts_per_round"] = (params.rollouts_per_round, params.group_size)
+            params.rollouts_per_round = params.group_size
 
     def validate(self):
         p = self.params

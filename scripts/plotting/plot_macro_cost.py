@@ -37,13 +37,14 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-SCENARIOS = [("rl_env", "S1\nRL env"), ("context_mgmt", "S2\ncontext"), ("multi_agent", "S3\nmulti-agent"),
-             ("dev_agent", "S4\ndev agent"), ("ops_agent", "S5\nops agent"), ("data_agent", "S6\ndata agent")]
-TITLES = {"rl_env": "S1 RL env (data-heavy)", "context_mgmt": "S2 context management",
-          "multi_agent": "S3 multi-agent (branch churn)", "dev_agent": "S4 dev agent (reconciliation)",
-          "ops_agent": "S5 ops agent", "data_agent": "S6 data agent (bulk data)"}
-MARKERS = {"rl_env": ("o", "#4c72b0"), "context_mgmt": ("v", "#937860"), "multi_agent": ("s", "#dd8452"),
-           "dev_agent": ("D", "#55a868"), "ops_agent": ("P", "#da8bc3"), "data_agent": ("^", "#8172b3")}
+from macrobench.scenarios import SCENARIOS as _REGISTRY, listed_keys  # noqa: E402
+
+# Scenario labels, markers and groups come from the scenario classes
+# (macrobench/scenarios), in registry order; examples are left out.
+_KEYS = listed_keys()
+SCENARIOS = [(k, _REGISTRY[k].plot_label) for k in _KEYS]
+TITLES = {k: _REGISTRY[k].title for k in _KEYS}
+MARKERS = {k: tuple(_REGISTRY[k].marker) for k in _KEYS}
 FOUR = ["rl_env", "multi_agent", "dev_agent", "data_agent"]
 NAMES = {"CHRONOS": "Chronos", "DOLT": "Doltgres", "DOLT_MYSQL": "Dolt", "FILE_COPY": "file_copy",
          "MATRIXONE": "MatrixOne", "NEON": "Neon", "SEEKDB": "SeekDB"}
@@ -298,18 +299,17 @@ def fig_bars(t, create_ms, scenarios, out, log=False):
 
 # --- cost_bars_grouped.png --------------------------------------------------
 
-GROUPS = [("Branch Intensive", ["context_mgmt", "multi_agent", "dev_agent"]),
-          ("Data Intensive", ["rl_env", "ops_agent", "data_agent"])]
+GROUPS = [("Branch Intensive", [k for k in _KEYS if _REGISTRY[k].group == "branch"]),
+          ("Data Intensive", [k for k in _KEYS if _REGISTRY[k].group == "data"])]
 # One hatch per system so the bars stay apart in black and white.
 HATCHES = {"Doltgres": "", "Dolt": "//", "Chronos": "..", "MatrixOne": "xx", "file_copy": "\\\\",
            "SeekDB": "--", "Neon": "++"}
-SHORT = {"rl_env": "S1 RL env", "context_mgmt": "S2 context mgmt", "multi_agent": "S3 multi-agent",
-         "dev_agent": "S4 dev agent", "ops_agent": "S5 ops agent", "data_agent": "S6 data agent"}
+SHORT = {k: _REGISTRY[k].label for k in _KEYS}
 # Scenarios whose spine traffic is counted with the data ops (stacked as a
 # lighter segment): S5's production phase is the workload itself (the
 # scenario drives the spine commits and waits for the load between them),
 # whereas S4's and S6's spine load is background traffic.
-SPINE_IN_DATA = {"ops_agent"}
+SPINE_IN_DATA = {k for k in _KEYS if _REGISTRY[k].spine_in_data}
 ROWS = [("branch_s", "branch ops\n(worker-sec)"), ("data_s", "data ops\n(worker-sec)"),
         ("elapsed", "elapsed\n(wall-clock s)")]
 

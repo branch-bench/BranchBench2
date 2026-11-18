@@ -24,8 +24,10 @@ carries the merging agent's value (the resolver takes theirs on that row).
 
 import threading
 import time
+from dataclasses import dataclass
 
 from macrobench.scenarios.base import Scenario, Worker, register
+from macrobench.scenarios.params import param
 
 SENTINEL_TASK = 0
 SHARED_SCRATCH = "scratch_shared"
@@ -94,6 +96,20 @@ def fixed_policy(db, conflicts):
 class MultiAgentScenario(Scenario):
     key = "multi_agent"
     name = "S3 multi-agent collaboration"
+
+    order = 3
+    label, plot_label, title = "S3 multi-agent", "S3\nmulti-agent", "S3 multi-agent (branch churn)"
+    marker, group = ("s", "#dd8452"), "branch"
+
+    @dataclass
+    class Params:
+        agents: int = param(0, intensity="branch", doc="N: agents per round (one branch each)")
+        rounds: int = param(0, intensity="branch", doc="checkpoints to collaborate on")
+        key_overlap: float = param(0.0, doc="share of an agent's edited rows every other agent also edits")
+        resolution_policy: str = param("FIXED_WORKFLOW", choices=("FIXED_WORKFLOW",),
+                                       doc="conflict resolution: FIXED_WORKFLOW (spine wins rows); LLM_ASSISTED is reserved")
+        shared_scratch_table: bool = param(False, doc="drop a shared table (schema conflict) instead of a private one")
+        spine_updates_per_round: int = param(0, intensity="data", doc="task/progress updates on the spine while agents work")
 
     def validate(self):
         p = self.params

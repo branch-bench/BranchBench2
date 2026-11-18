@@ -9,11 +9,13 @@ cd "$(dirname "$0")/../.."
 OUT=${1:-$(ls -d run_stats/macro_* 2>/dev/null | sort | tail -1)}
 [[ -d "$OUT/logs" ]] || { echo "no logs under $OUT"; exit 1; }
 D="$OUT/logs/_driver.log"
+# Scenario keys in order, from the registry (examples included).
+SCENARIO_KEYS=$(uv run -q python -m macrobench.scenarios --list --examples 2>/dev/null)
 echo "run set: $OUT   started $(head -1 "$D" | grep -oE '[0-9]{4}-[0-9-]+T[0-9:]+Z')   now $(date -u +%FT%TZ)"
 grep -q "ALL DONE" "$D" && echo "ALL DONE $(grep 'ALL DONE' "$D" | grep -oE '[0-9]{4}-[0-9-]+T[0-9:]+Z')"
 for b in $(grep -oE "START [a-z_]+ [a-z_]+" "$D" | awk '{print $3}' | sort -u); do
     done_list=""
-    for s in rl_env context_mgmt multi_agent dev_agent ops_agent data_agent; do
+    for s in $SCENARIO_KEYS; do
         L="$OUT/logs/${s}_${b}.log"; [[ -f "$L" ]] || continue
         # The last START/END line for this cell decides whether it is
         # finished (a rerun after a failure shows as running, not failed).

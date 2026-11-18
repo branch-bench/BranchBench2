@@ -75,7 +75,9 @@ enum BaseSchema {
     NO_BASE = 1;    // extension tables only (S2, S3 start without CH data)
 }
 
-// Per-scenario extension tables (see macrobench/schema/*.sql).
+// Per-scenario extension tables (see macrobench/schema/*.sql). Deprecated:
+// a scenario's tables are found by name (macrobench/schema/<key>.sql);
+// SchemaConfig.extensions only overrides that for the six original ones.
 enum SchemaExtension {
     EXT_UNSPECIFIED = 0;
     RL_ENV_EXT = 1;        // rl_task
@@ -279,7 +281,24 @@ message Workload {
     float branch_intensity = 3;
     float data_intensity = 4;
 
-    oneof scenario {
+    // The scenario to run: a registered scenario key
+    // (`python -m macrobench.scenarios --list`), e.g. "multi_agent".
+    string scenario = 20;
+    // The scenario's parameters by name, values as text; the scenario's
+    // Params dataclass parses each value by its declared type and rejects
+    // unknown names. Parameters left out keep the dataclass default.
+    //   params { key: "agents" value: "128" }
+    map<string, string> params = 21;
+
+    // One message per scenario (converted to scenario + params). The six
+    // shipped presets in macrobench/configs still use it: the leaderboard
+    // reads the scenario's name as a key of the workload and digests the
+    // presets as the workload's identity. New scenarios use only the two
+    // fields above.
+    // TODO: switch the shipped presets to scenario + params together with
+    // a leaderboard change (accept workload.scenario; keep earlier
+    // campaigns comparable across the digest change), then retire this.
+    oneof legacy_scenario {
         RlEnvParams rl_env = 10;
         ContextMgmtParams context_mgmt = 11;
         MultiAgentParams multi_agent = 12;

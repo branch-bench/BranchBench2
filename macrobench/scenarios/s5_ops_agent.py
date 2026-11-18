@@ -53,9 +53,11 @@ later diff lists the updated row as deleted plus added on both sides.
 
 import time
 from datetime import datetime
+from dataclasses import dataclass
 
 from macrobench import faults, tpcc
 from macrobench.scenarios.base import Scenario, Worker, register
+from macrobench.scenarios.params import param
 
 DEFAULT_COMMIT_EVERY_TXNS = 20
 BAD_VERSION = "v-bad-deploy"
@@ -65,7 +67,36 @@ BAD_VERSION = "v-bad-deploy"
 class OpsAgentScenario(Scenario):
     key = "ops_agent"
     name = "S5 operations agent"
+
+    order = 5
+    label, plot_label, title = "S5 ops agent", "S5\nops agent", "S5 ops agent"
+    marker, group = ("P", "#da8bc3"), "data"
+    spine_in_data = True
+
+    @dataclass
+    class Params:
+        spine_commits: int = param(0, intensity="branch", doc="commits on the spine (all incidents)")
+        fault_commit_offset: int = param(0, doc="commits before an incident's last commit where the bad deploy lands")
+        investigation_branches: int = param(0, intensity="branch", doc="investigation branches (shared across incidents)")
+        history_offset: int = param(0, doc="investigation branches fork from the last this-many commits")
+        load_during_investigation: bool = param(False, doc="keep the spine load running while investigating")
+        commit_every_txns: int = param(0, intensity="data", doc="spine transactions between production commits (0 = 20)")
+        schema_fault: bool = param(False, doc="the bad deploy also changes the schema (the reset must undo it)")
+        commits_per_incident: int = param(0, doc="commits per incident (0 = one incident over all spine commits)")
+
+    @classmethod
+    def after_intensity(cls, params, changed):
+        # The fault offset is per incident and not scaled; keep it strictly
+        # inside an incident (or the whole spine).
+        limit = params.commits_per_incident or params.spine_commits
+        off = min(params.fault_commit_offset, max(1, limit - 1))
+        if off != params.fault_commit_offset:
+            changed["ops_agent.fault_commit_offset"] = (params.fault_commit_offset, off)
+            params.fault_commit_offset = off
     uses_spine_load = True
+    # Routine deploys between the bad deploy (which drops approved_by) and
+    # the reset write approved_by and fail: the outage the agent recovers from.
+    expected_failures = (("deploy", "approved_by"),)
 
     def validate(self):
         p = self.params

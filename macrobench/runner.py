@@ -45,30 +45,36 @@ from macrobench.scenarios import (  # noqa: F401 (registers the scenarios)
     ScenarioContext,
     ScenarioStopped,
     create_scenario,
+    load_params,
+    scenario_key as scenario_key_of,
 )
+from macrobench.scenarios.params import params_to_dict
 from macrobench.tpcc import SpineLoad
 from dblib.db_api import native_only
 from microbench.runner2 import SharedProgress
 
 
-def load_config(path: str) -> tp.MacroBenchConfig:
+def load_run_config(path: str):
+    """(config, params): the parsed config and the scenario's Params
+    instance with the intensity multipliers applied."""
     config = tp.MacroBenchConfig()
     with open(path, "r") as f:
         text_format.Parse(f.read(), config)
     if not config.run_id:
         raise ValueError("run_id is required")
-    if config.workload.WhichOneof("scenario") is None:
-        raise ValueError("workload must set one scenario (rl_env, context_mgmt, ...)")
-    if (config.workload.HasField("multi_agent")
-            and config.workload.multi_agent.resolution_policy == tp.ResolutionPolicy.LLM_ASSISTED):
-        raise ValueError("multi_agent.resolution_policy LLM_ASSISTED is not implemented yet")
-    scaled = apply_intensity(config.workload)
+    key, params = load_params(config)
+    scaled = apply_intensity(config.workload, SCENARIOS[key], params)
     if scaled:
         w = config.workload
         print(f"Intensity: branch x{w.branch_intensity or 1.0}, data x{w.data_intensity or 1.0}")
         for name, (before, after) in scaled.items():
             print(f"  {name}: {before} -> {after}")
-    return config
+    return config, params
+
+
+def load_config(path: str) -> tp.MacroBenchConfig:
+    """The parsed config with the intensity multipliers applied."""
+    return load_run_config(path)[0]
 
 
 def _flush_to_disk(suite):
@@ -210,34 +216,34 @@ def _argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_args(argv: list[str] | None) -> tuple[argparse.Namespace, tp.MacroBenchConfig]:
+def _load_args(argv: list[str] | None) -> tuple[argparse.Namespace, tp.MacroBenchConfig, object]:
     parser = _argument_parser()
     args = parser.parse_args(argv)
     try:
-        config = load_config(args.config)
+        config, params = load_run_config(args.config)
     except (OSError, text_format.ParseError, ValueError) as error:
         parser.error(str(error))
     if args.measure_storage:
         config.measure_storage = True
-    return args, config
+    return args, config, params
 
 
 def run(argv: list[str], *, target: PreparedTarget, system_name: str) -> dict:
     """Run one scenario on ``target`` and return its e2e stats."""
-    args, config = _load_args(argv)
-    return _run(args, config, target=target, system_name=system_name)
+    args, config, params = _load_args(argv)
+    return _run(args, config, params, target=target, system_name=system_name)
 
 
-def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
+def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, params, *,
          target: PreparedTarget, system_name: str,
          _finalize_result: Callable[[dict, object], None] | None = None) -> dict:
-    scenario_key = config.workload.WhichOneof("scenario")
+    scenario_key = scenario_key_of(config)
     print(f"Run ID: {config.run_id}")
     print(f"System: {system_name}")
     print(f"Scenario: {scenario_key}")
     print(f"Schema: base={tp.BaseSchema.Name(config.schema.base)} "
           f"W={config.schema.scale_factor or 1}")
-    print(f"Params: {MessageToDict(getattr(config.workload, scenario_key))}")
+    print(f"Params: {params_to_dict(params)}")
     print(f"Branch ops: {MessageToDict(config.workload.branch_ops)}")
     print(f"Data ops: {MessageToDict(config.workload.data_ops)}")
     if config.measure_storage:
@@ -282,7 +288,7 @@ def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
                                    fail_fast=config.invariants.fail_fast)
     ctx = ScenarioContext(config=config, suite_factory=suite_factory,
                           collector=collector, spine=target.root_ref,
-                          invariants=invariants, log=print)
+                          invariants=invariants, log=print, params=params)
     scenario = create_scenario(ctx)
     scenario.validate()
     ctx.work.expected = int(scenario.total_units())
@@ -437,6 +443,8 @@ def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
             "seed": ctx.seed,
             "schema": MessageToDict(config.schema),
             "workload": MessageToDict(config.workload),
+            # The scenario's effective parameters (after intensity scaling).
+            "params": params_to_dict(params),
             "setup": seed_stats,
             "capabilities": target.suite_type.capabilities(),
             "implementation": implementation_report(target.suite_type),
@@ -495,7 +503,7 @@ def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
 
 def main(argv: list[str] | None = None) -> dict:
     """Prepare the configured database, run the scenario, and clean up."""
-    args, config = _load_args(argv)
+    args, config, params = _load_args(argv)
     backend = args.backend or tp.Backend.Name(config.backend)
     if args.db_name is not None:
         config.database_setup.db_name = args.db_name
@@ -534,7 +542,7 @@ def main(argv: list[str] | None = None) -> dict:
         print(f"Storage after cleanup: {after_cleanup} bytes")
 
     try:
-        return _run(args, config, target=target, system_name=backend.upper(),
+        return _run(args, config, params, target=target, system_name=backend.upper(),
                     _finalize_result=finalize_result)
     finally:
         cleanup()

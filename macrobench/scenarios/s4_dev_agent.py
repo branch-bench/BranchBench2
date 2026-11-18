@@ -43,8 +43,10 @@ and every spine migration present.
 
 import threading
 import time
+from dataclasses import dataclass
 
 from macrobench.scenarios.base import Scenario, Worker, register
+from macrobench.scenarios.params import param
 from macrobench.datagen.ch import DISTRICTS_PER_WAREHOUSE
 
 SPINE_SENTINEL_BASE = 100_000
@@ -76,8 +78,28 @@ SCHEMA_CONFLICT_MIGRATION = ("M6_c_tier_conflict", "customer",
 class DevAgentScenario(Scenario):
     key = "dev_agent"
     name = "S4 development agent"
+
+    order = 4
+    label, plot_label, title = "S4 dev agent", "S4\ndev agent", "S4 dev agent (reconciliation)"
+    marker, group = ("D", "#55a868"), "branch"
+
+    @dataclass
+    class Params:
+        dev_branches: int = param(0, intensity="branch", doc="dev branches created over the run")
+        concurrent_branches: int = param(0, doc="dev branches alive at once")
+        dev_phase_steps: int = param(0, intensity="data", doc="hot steps per branch")
+        review_phase_steps: int = param(0, intensity="data", doc="quiet steps per branch")
+        review_modification_prob: float = param(0.0, doc="probability a review step modifies the branch")
+        rebases_per_branch: int = param(0, intensity="branch", cap=2, doc="rebases onto the spine per branch (1 or 2)")
+        spine_migration_interval: int = param(0, doc="dev steps between spine schema migrations (0 = none)")
+        key_overlap: float = param(0.0, doc="chance a migration hits the branch's table; share of backfilled rows also rewritten")
+        schema_conflict_migration: int = param(0, doc="k-th migration adds a conflicting customer.c_tier (0 = never)")
+        spine_commit_every_txns: int = param(0, intensity="data", doc="spine transactions between production checkpoints (0 = 200)")
     uses_spine_load = True
     spine_touches_c_data = True
+    # The schema check probes whether c_tier exists by selecting it; a
+    # missing-column error is the answer, not a failure.
+    expected_failures = (("invariant", "c_tier"),)
 
     def validate(self):
         p = self.params

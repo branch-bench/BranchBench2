@@ -25,6 +25,7 @@ from dblib import result_collector as rc
 from dblib import result_pb2 as rslt
 from dblib.db_api import DBToolSuite, OpResult
 from macrobench import task_pb2 as tp
+from macrobench.scenarios.params import NoParams, parse_params, params_from_legacy
 from macrobench.datagen.ch import CHScale
 
 
@@ -158,12 +159,16 @@ class ScenarioContext:
     work: WorkSummary = field(default_factory=WorkSummary)
     _slots: Optional[threading.BoundedSemaphore] = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    # The scenario's Params instance. The runner passes it after applying
+    # the intensity multipliers; when None it is read from the config.
+    params: object = None
 
     def __post_init__(self):
         self.seed = self.config.seed or 42
         self.rng = random.Random(self.seed)
         self.scale = CHScale.from_config(self.config.schema)
-        self.params = getattr(self.config.workload, self.scenario_key)
+        if self.params is None:
+            _, self.params = load_params(self.config)
         self.branch_ops = self.config.workload.branch_ops
         self.data_ops = self.config.workload.data_ops
         cap = self.branch_ops.max_live_branches
@@ -187,7 +192,7 @@ class ScenarioContext:
 
     @property
     def scenario_key(self) -> str:
-        return self.config.workload.WhichOneof("scenario")
+        return scenario_key(self.config)
 
     @property
     def commit_interval(self) -> int:
@@ -414,11 +419,38 @@ class Worker:
 
 
 class Scenario(ABC):
-    """One benchmark workflow. Subclasses set ``key`` (the Workload oneof
-    field), ``name`` and ``extension`` and implement run()."""
+    """One benchmark workflow. A subclass sets ``key`` and ``name``, declares
+    its parameters as a ``Params`` dataclass (see scenarios/params.py),
+    implements run() and is registered with ``@register``. Everything else
+    the benchmark needs to know about it (plot labels, its group, its
+    extension tables) is a class attribute below."""
 
-    key: str = ""
-    name: str = ""
+    key: str = ""                   # config value of workload.scenario
+    name: str = ""                  # e.g. "S3 Multi-agent collaboration"
+    Params = NoParams               # the scenario's parameters (a dataclass)
+    # Position in lists, sweeps and figures (S<order>).
+    order: int = 100
+    # Labels: one line ("S3 multi-agent"), two lines for narrow axes
+    # ("S3\nmulti-agent"), and a figure title ("S3 multi-agent (branch churn)").
+    label: str = ""
+    plot_label: str = ""
+    title: str = ""
+    # Marker and colour in scatter figures.
+    marker: tuple = ("o", "#7f7f7f")
+    # "branch" or "data": which kind of work dominates (figure grouping).
+    group: str = "branch"
+    # Count the spine load with the data operations in cost figures (the
+    # spine traffic is the workload itself, not background load).
+    spine_in_data: bool = False
+    # Extension tables: a file in macrobench/schema/; default "<key>.sql"
+    # when that file exists.
+    schema_file: Optional[str] = None
+    # Examples (the template) are registered but left out of default lists
+    # and sweeps.
+    example: bool = False
+    # Operations that fail by design, as (label, text in the error): the
+    # tests accept these and nothing else. Keep it short and say why.
+    expected_failures: tuple = ()
     # Does the scenario run the TPC-C spine load when spine_clients > 0?
     uses_spine_load: bool = False
     # Payment transactions rewrite customer.c_data (S4 rebase conflicts).
@@ -445,6 +477,12 @@ class Scenario(ABC):
     def validate(self) -> None:
         """Reject configs the scenario cannot run (raise ValueError)."""
 
+    @classmethod
+    def after_intensity(cls, params, changed: dict) -> None:
+        """Adjust ``params`` after the intensity multipliers were applied
+        (keep dependent values consistent); record each change in
+        ``changed`` as ``{"<key>.<field>": (before, after)}``."""
+
     # -- helpers shared by scenarios --------------------------------------
 
     def quiesced(self):
@@ -467,12 +505,56 @@ SCENARIOS: dict = {}
 
 
 def register(cls):
+    """Class decorator: make a Scenario subclass runnable by its key."""
+    if not cls.key:
+        raise ValueError(f"{cls.__name__} has no key")
+    if cls.key in SCENARIOS and SCENARIOS[cls.key] is not cls:
+        raise ValueError(f"scenario key {cls.key!r} is already registered by {SCENARIOS[cls.key].__name__}")
+    if cls.group not in ("branch", "data"):
+        raise ValueError(f"{cls.__name__}.group must be 'branch' or 'data'")
+    cls.label = cls.label or cls.name
+    cls.plot_label = cls.plot_label or cls.label
+    cls.title = cls.title or cls.label
     SCENARIOS[cls.key] = cls
     return cls
 
 
-def create_scenario(ctx: ScenarioContext) -> Scenario:
-    key = ctx.scenario_key
+def scenario_key(config: tp.MacroBenchConfig) -> str:
+    """The scenario a config runs: ``workload.scenario``, or the field of
+    the deprecated per-scenario message it sets."""
+    w = config.workload
+    legacy = w.WhichOneof("legacy_scenario")
+    if w.scenario and legacy:
+        raise ValueError(f"workload sets both scenario {w.scenario!r} and the deprecated "
+                         f"{legacy} {{...}} block; use one")
+    key = w.scenario or legacy
+    if not key:
+        raise ValueError("workload.scenario is not set (one of: "
+                         f"{', '.join(listed_keys(include_examples=True))})")
+    return key
+
+
+def scenario_class(key: str):
     if key not in SCENARIOS:
-        raise ValueError(f"No scenario for workload.{key}; known: {sorted(SCENARIOS)}")
-    return SCENARIOS[key](ctx)
+        raise ValueError(f"unknown scenario {key!r}; known: {', '.join(listed_keys(include_examples=True))}")
+    return SCENARIOS[key]
+
+
+def load_params(config: tp.MacroBenchConfig):
+    """(key, Params instance) from a config, before intensity scaling."""
+    key = scenario_key(config)
+    cls = scenario_class(key)
+    w = config.workload
+    if w.scenario:
+        return key, parse_params(key, cls.Params, dict(w.params))
+    return key, params_from_legacy(key, cls.Params, getattr(w, key))
+
+
+def listed_keys(include_examples: bool = False) -> list:
+    """Registered scenario keys in order (examples only on request)."""
+    classes = sorted(SCENARIOS.values(), key=lambda c: (c.order, c.key))
+    return [c.key for c in classes if include_examples or not c.example]
+
+
+def create_scenario(ctx: ScenarioContext) -> Scenario:
+    return scenario_class(ctx.scenario_key)(ctx)

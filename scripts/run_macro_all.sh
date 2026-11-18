@@ -9,8 +9,8 @@
 #
 #   backend ...   subset of: dolt dolt_mysql seekdb matrixone neon file_copy chronos
 #                 (default: all seven; bauplan and xata are not run by default)
-#   --scenarios   comma-separated subset of: rl_env context_mgmt multi_agent
-#                 dev_agent ops_agent data_agent (default: all six)
+#   --scenarios   comma-separated subset of the registered scenarios
+#                 (python -m macrobench.scenarios --list; default: all of them)
 #   --native-only every operation an adapter simulates runs as unsupported and
 #                 ends its run (DBFORK_NATIVE_ONLY=1), to measure the engines' own primitives
 #   --parallel    run the backends at the same time, each going through its
@@ -92,7 +92,7 @@ MANAGE_SERVERS=true
 PARALLEL=false
 COLOCATE_DRIVERS=false
 STORAGE_FLAGS=(--storage-sample-interval 5)
-SCENARIOS=(rl_env context_mgmt multi_agent dev_agent ops_agent data_agent)
+SCENARIOS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mini)              MINI="--mini"; shift ;;
@@ -115,9 +115,13 @@ BACKENDS=("$@")
 if [[ ${#BACKENDS[@]} -eq 0 ]]; then
     BACKENDS=(dolt dolt_mysql seekdb matrixone neon file_copy chronos)
 fi
+# Scenario keys come from the registry (examples are valid by name, not run by default).
+KNOWN_SCENARIOS=" $(uv run -q python -m macrobench.scenarios --list --examples | tr '\n' ' ') "
+if [[ ${#SCENARIOS[@]} -eq 0 ]]; then
+    mapfile -t SCENARIOS < <(uv run -q python -m macrobench.scenarios --list)
+fi
 for sc in "${SCENARIOS[@]}"; do
-    case "$sc" in rl_env|context_mgmt|multi_agent|dev_agent|ops_agent|data_agent) ;;
-        *) echo "unknown scenario '$sc'"; exit 1 ;; esac
+    [[ "$KNOWN_SCENARIOS" == *" $sc "* ]] || { echo "unknown scenario '$sc' (known:$KNOWN_SCENARIOS)"; exit 1; }
 done
 
 if [[ -z "$OUTROOT" ]]; then

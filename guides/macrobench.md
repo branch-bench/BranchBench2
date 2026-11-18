@@ -15,7 +15,10 @@ whether the sentinel-based invariance checks held.
 | S6 Data agent | `data_agent` | ingestion batches rebased and merged into a warehouse | branch, commit, reset, rebase, merge, delete |
 
 Each scenario lives in `macrobench/scenarios/s<N>_<key>.py` with its
-parametrized SQL and exec() scripts; `macrobench/faults.py` holds the fault
+parameters, parametrized SQL and exec() scripts and its invariant checks
+(`uv run python -m macrobench.scenarios --list` prints the registered
+scenarios; [adding_a_scenario.md](adding_a_scenario.md) explains how to
+write one); `macrobench/faults.py` holds the fault
 catalog and the TPC-C consistency conditions S1 and S5 use;
 `macrobench/tpcc.py` holds the TPC-C transactions and CH queries that the
 optional spine load runs.
@@ -34,8 +37,8 @@ workload {
   branch_ops { commit_interval: 2 }                        # commit every 2 steps
   data_ops { statements_per_step: 8 rows_per_write: 5     # exec() intensity
              write_fraction: 0.8 spine_clients: 4 analytical_fraction: 0.8 }
-  data_agent { batches: 32 concurrent_batches: 8 batch_rows: 2000
-               days_back: 3 steps_per_batch: 10 resets_per_batch: 1 }
+  data_agent { batches: 32 concurrent_batches: 8 batch_rows: 2000   # the scenario
+               days_back: 3 steps_per_batch: 10 resets_per_batch: 1 }  # and its parameters
 }
 ```
 
@@ -49,16 +52,31 @@ workload {
 - `workload.branch_ops` and `workload.data_ops` set the shared intensity
   (commit interval, retention, live-branch cap; statements per step, rows per
   write, read/write/DDL mix, worker threads, background spine clients).
-- The scenario message holds the paper's structural parameters (T/G/S, N,
-  fan-out, cycles, D, p, ...).
+- The scenario block (`data_agent { ... }`) names the scenario and sets its
+  parameters (the paper's structural parameters: T/G/S, N, fan-out,
+  cycles, D, ...); a parameter left out keeps its default. A scenario
+  without a block of its own in `macrobench/task.proto` (a new one, such
+  as the template) is named with `workload.scenario` and configured with
+  `workload.params`, values as text parsed by the type the scenario
+  declares:
+
+  ```
+  scenario: "example"
+  params { key: "branches" value: "4" }
+  ```
+
+  An unknown name or a bad value is an error either way. `uv run python -m
+  macrobench.scenarios --describe <key>` lists a scenario's parameters
+  with their types, defaults and meaning.
 - `workload.branch_intensity` and `workload.data_intensity` are multipliers
   applied on top of the explicit knobs before the run (0 or 1 = unchanged).
   Branch intensity scales the number of branch operations (branches, forks,
   rounds, rebases, investigation points) and divides `commit_interval`;
   data intensity scales the SQL per branch (statements per step, rows per
   write, spine clients, per-branch steps and rows). Thread counts, caps and
-  probabilities are not scaled. `macrobench/intensity.py` lists the exact
-  fields; the effective values are printed and written to the e2e stats.
+  probabilities are not scaled. Each scenario tags which of its parameters
+  scale (`--describe` shows them); the effective values are printed and
+  written to the e2e stats under `params`.
 - `invariants { disabled: true }` turns the sentinel checks off;
   `fail_fast: true` stops at the first failure.
 

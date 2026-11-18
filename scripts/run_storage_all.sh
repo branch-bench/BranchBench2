@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-SCENARIOS=(rl_env context_mgmt multi_agent dev_agent ops_agent data_agent)
+mapfile -t SCENARIOS < <(cd "$SCRIPT_DIR/.." && uv run -q python -m macrobench.scenarios --list)
 
 TOTAL=$(( ${#SCENARIOS[@]} * ${#BACKENDS[@]} ))
 COUNT=0

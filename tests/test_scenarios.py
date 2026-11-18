@@ -5,16 +5,32 @@ them completes with every check passed; one that does ends at its first
 unsupported branch operation with UnsupportedOperationAbort, the branch operation recorded in the
 support summary and named in the context, and no failed check."""
 
+from dataclasses import fields
+from pathlib import Path
+
 import pytest
 from google.protobuf import text_format
 
 from dblib import result_collector as rc
+from dblib import result_pb2 as rslt
 from macrobench import schema, task_pb2 as tp
 from macrobench.datagen.ch import CHScale, seed_ch
-from macrobench.scenarios import (InvariantRecorder, ScenarioContext, UnsupportedOperationAbort,
-                                  create_scenario)
+from macrobench.scenarios import (SCENARIOS, InvariantRecorder, ScenarioContext,
+                                  UnsupportedOperationAbort, create_scenario, listed_keys)
 from tests.fake_backend import FakeSuite
 
+# The fake backend is one in-memory SQLite connection: CH-benCHmark data is
+# shrunk to a few rows, and parameters that set concurrency run with one
+# worker. Everything else comes from the scenario's own mini config.
+TINY_CH = dict(scale_factor=1, items=60, customers_per_district=10, orders_per_district=10,
+               suppliers=5, skip_foreign_keys=True)
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "macrobench" / "configs"
+
+NEEDS_MERGE = {"context_mgmt", "multi_agent", "dev_agent", "data_agent", "example"}
+
+
+
+# Tiny per-scenario configs other test modules build runs from.
 MINI_SCHEMA = ("schema { base: CH_BENCH scale_factor: 1 items: 60 customers_per_district: 10 "
                "orders_per_district: 10 suppliers: 5 skip_foreign_keys: true }")
 
@@ -46,16 +62,54 @@ CONFIGS = {
                    data_agent { batches: 2 concurrent_batches: 1 batch_rows: 4 days_back: 2 steps_per_batch: 2 resets_per_batch: 1 } }""",
 }
 
-NEEDS_MERGE = {"context_mgmt", "multi_agent", "dev_agent", "data_agent"}
-
 
 def _config(key: str) -> tp.MacroBenchConfig:
+    """The scenario's mini config, shrunk to the fake backend's size."""
     cfg = tp.MacroBenchConfig()
-    text_format.Parse('run_id: "t" seed: 7 ' + CONFIGS[key], cfg)
+    text_format.Parse((CONFIG_DIR / f"{key}_mini.textproto").read_text(), cfg)
+    cfg.seed = 7
+    if cfg.schema.base == tp.BaseSchema.CH_BENCH:
+        for name, value in TINY_CH.items():
+            setattr(cfg.schema, name, value)
+    cfg.workload.data_ops.worker_threads = 1
+    cfg.workload.data_ops.spine_clients = 0
+    # The shipped presets spell parameters in the scenario's own message
+    # (legacy_scenario); a scenario without one uses the params map.
+    legacy = cfg.workload.WhichOneof("legacy_scenario")
+    for name in [f.name for f in fields(SCENARIOS[key].Params)]:
+        if name.startswith("concurrent_"):
+            if legacy:
+                setattr(getattr(cfg.workload, legacy), name, 1)
+            else:
+                cfg.workload.params[name] = "1"
     return cfg
 
 
-@pytest.mark.parametrize("key", sorted(CONFIGS))
+# Statements the fake backend's SQLite cannot run (not scenario failures).
+FAKE_BACKEND_GAPS = (("bad_deploy_ddl", "syntax error"),)   # ALTER COLUMN ... TYPE
+
+
+def _failed_ops(collector, key: str) -> dict:
+    """{(label, error head): count} of FAILED rows the scenario does not
+    declare as failing by design (Scenario.expected_failures)."""
+    allowed = tuple(SCENARIOS[key].expected_failures) + FAKE_BACKEND_GAPS
+    out = {}
+    for r in collector.results:
+        if r.status != rslt.OpStatus.FAILED:
+            continue
+        if any(r.label == label and text in r.error_message for label, text in allowed):
+            continue
+        k = (r.label, r.error_message[:80])
+        out[k] = out.get(k, 0) + 1
+    return out
+
+
+def test_every_scenario_has_a_mini_config():
+    for key in listed_keys(include_examples=True):
+        assert (CONFIG_DIR / f"{key}_mini.textproto").is_file(), f"{key} has no {key}_mini.textproto"
+
+
+@pytest.mark.parametrize("key", listed_keys(include_examples=True))
 def test_scenario_runs_to_completion_on_fake_backend(key):
     cfg = _config(key)
     collector = rc.ResultCollector()
@@ -91,3 +145,5 @@ def test_scenario_runs_to_completion_on_fake_backend(key):
         # Every branch the scenario made was deleted again.
         assert suite.list_branches() == ["main"], suite.list_branches()
     assert summary["failed"] == 0, [r for r in summary["results"] if r["passed"] is False]
+    # Checks passing is not enough: no operation may have failed either.
+    assert _failed_ops(collector, key) == {}, _failed_ops(collector, key)

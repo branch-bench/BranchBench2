@@ -54,15 +54,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-SCENARIO_ORDER = ["rl_env", "context_mgmt", "multi_agent", "dev_agent", "ops_agent", "data_agent"]
-SCENARIO_TITLES = {
-    "rl_env": "S1 RL env",
-    "context_mgmt": "S2 Context mgmt",
-    "multi_agent": "S3 Multi-agent",
-    "dev_agent": "S4 Dev agent",
-    "ops_agent": "S5 Ops agent",
-    "data_agent": "S6 Data agent",
-}
+from macrobench.scenarios import SCENARIOS as _REGISTRY, listed_keys  # noqa: E402
+
+# Scenario order and titles from the scenario classes (examples last).
+SCENARIO_ORDER = listed_keys() + [k for k in listed_keys(include_examples=True) if k not in listed_keys()]
+SCENARIO_TITLES = {k: _REGISTRY[k].label for k in SCENARIO_ORDER}
 BRANCH_OPS = ["BRANCH", "COMMIT", "DIFF", "SCHEMA_DIFF", "LOG", "MERGE", "REBASE", "REVERT", "RESET", "DELETE"]
 DATA_OPS = ["READ", "INSERT", "UPDATE", "DELETE_ROWS", "DDL"]
 # EXEC rows summarise the statements they contain, so they are excluded from

@@ -13,7 +13,9 @@ from dblib.db_api import DBToolSuite
 from macrobench import faults, schema, task_pb2 as tp
 from macrobench.datagen.ch import CHScale, CHGenerator, seed_ch
 from macrobench.intensity import apply_intensity
+from macrobench.scenarios import SCENARIOS, load_params
 from macrobench.scenarios.base import InvariantFailed, InvariantRecorder
+from macrobench.scenarios.params import parse_params
 from macrobench.tpcc import Quiescer, SpineLoad
 from tests.fake_backend import FakeSuite
 
@@ -173,6 +175,15 @@ def test_spine_load_wait_for_total_counts_transactions_and_stops():
     assert not load.wait_for_total(100, stop=stop, poll=0.01)
 
 
+def _scaled(key, branch=1.0, data=1.0, workload=None, **values):
+    """(workload, params, changed) after apply_intensity on ``values``."""
+    cls = SCENARIOS[key]
+    w = workload or tp.Workload()
+    w.branch_intensity, w.data_intensity = branch, data
+    params = parse_params(key, cls.Params, values)
+    return w, params, apply_intensity(w, cls, params)
+
+
 def test_intensity_scales_branch_and_data_knobs():
     w = tp.Workload()
     w.branch_ops.commit_interval = 4
@@ -180,57 +191,38 @@ def test_intensity_scales_branch_and_data_knobs():
     w.data_ops.rows_per_write = 100
     w.data_ops.spine_clients = 2
     w.data_ops.worker_threads = 8
-    w.dev_agent.dev_branches = 10
-    w.dev_agent.concurrent_branches = 3
-    w.dev_agent.dev_phase_steps = 5
-    w.dev_agent.rebases_per_branch = 1
-    w.dev_agent.spine_commit_every_txns = 20
-    w.branch_intensity = 2.0
-    w.data_intensity = 0.5
-    changed = apply_intensity(w)
+    w, p, changed = _scaled("dev_agent", 2.0, 0.5, workload=w, dev_branches=10, concurrent_branches=3,
+                            dev_phase_steps=5, rebases_per_branch=1, spine_commit_every_txns=20)
     assert w.branch_ops.commit_interval == 2
-    assert w.dev_agent.dev_branches == 20
-    assert w.dev_agent.rebases_per_branch == 2          # capped at 2
-    assert w.dev_agent.concurrent_branches == 3         # threads untouched
+    assert p.dev_branches == 20
+    assert p.rebases_per_branch == 2                    # capped at 2
+    assert p.concurrent_branches == 3                   # threads untouched
     assert w.data_ops.statements_per_step == 4
     assert w.data_ops.rows_per_write == 50
     assert w.data_ops.spine_clients == 1
     assert w.data_ops.worker_threads == 8               # threads untouched
-    assert w.dev_agent.dev_phase_steps == 2             # round(2.5) -> 2
-    assert w.dev_agent.spine_commit_every_txns == 10    # data knob
+    assert p.dev_phase_steps == 2                       # round(2.5) -> 2
+    assert p.spine_commit_every_txns == 10              # data knob
     assert changed["dev_agent.dev_branches"] == (10, 20)
     assert "data_ops.worker_threads" not in changed
 
 
 def test_intensity_keeps_ops_agent_offset_inside_spine_and_caps_fanout():
-    w = tp.Workload()
-    w.ops_agent.spine_commits = 6
-    w.ops_agent.fault_commit_offset = 5
-    w.ops_agent.investigation_branches = 2
-    w.ops_agent.commit_every_txns = 20
-    w.branch_intensity = 0.5
-    w.data_intensity = 2.0
-    apply_intensity(w)
-    assert w.ops_agent.spine_commits == 3
-    assert 0 < w.ops_agent.fault_commit_offset < w.ops_agent.spine_commits
-    assert w.ops_agent.commit_every_txns == 40          # data knob, not branch
+    _, p, _ = _scaled("ops_agent", 0.5, 2.0, spine_commits=6, fault_commit_offset=5,
+                      investigation_branches=2, commit_every_txns=20)
+    assert p.spine_commits == 3
+    assert 0 < p.fault_commit_offset < p.spine_commits
+    assert p.commit_every_txns == 40                    # data knob, not branch
 
-    w = tp.Workload()
-    w.context_mgmt.fanout = 6
-    w.context_mgmt.compaction_cycles = 1
-    w.branch_intensity = 3.0
-    apply_intensity(w)
-    assert w.context_mgmt.fanout == 10
-    assert w.context_mgmt.compaction_cycles == 3
+    _, p, _ = _scaled("context_mgmt", 3.0, fanout=6, compaction_cycles=1)
+    assert p.fanout == 10
+    assert p.compaction_cycles == 3
 
-    w = tp.Workload()
-    w.rl_env.tasks = 2
-    w.branch_intensity = -1.0
     with pytest.raises(ValueError):
-        apply_intensity(w)
-    w.branch_intensity = 0.0   # 0 means unchanged
-    assert apply_intensity(w) == {}
-    assert w.rl_env.tasks == 2
+        _scaled("rl_env", -1.0, tasks=2)
+    _, p, changed = _scaled("rl_env", 0.0, tasks=2)    # 0 means unchanged
+    assert changed == {}
+    assert p.tasks == 2
 
 
 def test_session_transaction_rolls_back_on_error(suite):
@@ -275,8 +267,8 @@ def test_intensity_caps_rl_env_group_size():
     cfg = tp.MacroBenchConfig()
     text_format.Parse((files("macrobench") / "configs" / "rl_env.textproto").read_text(), cfg)
     cfg.workload.branch_intensity = 5.0
-    apply_intensity(cfg.workload)
-    p = cfg.workload.rl_env
+    key, p = load_params(cfg)
+    apply_intensity(cfg.workload, SCENARIOS[key], p)
     assert p.tasks == 80                 # tasks keep scaling
     assert p.group_size == 32            # a GRPO group is capped
     assert p.rollouts_per_round == 4     # concurrency is not an intensity knob

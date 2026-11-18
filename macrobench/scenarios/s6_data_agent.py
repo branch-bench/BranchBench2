@@ -26,8 +26,10 @@ merged batch orders (what the additive resolver must produce).
 import math
 import threading
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 
 from macrobench.scenarios.base import Scenario, Worker, register
+from macrobench.scenarios.params import param
 from macrobench.datagen.ch import DISTRICTS_PER_WAREHOUSE, insert_rows
 
 ORDER_ID_BASE = 10_000_000
@@ -76,6 +78,19 @@ def additive_resolver(db, conflicts):
 class DataAgentScenario(Scenario):
     key = "data_agent"
     name = "S6 data agent"
+
+    order = 6
+    label, plot_label, title = "S6 data agent", "S6\ndata agent", "S6 data agent (bulk data)"
+    marker, group = ("^", "#8172b3"), "data"
+
+    @dataclass
+    class Params:
+        batches: int = param(0, intensity="branch", doc="ingestion batches (one branch each)")
+        concurrent_batches: int = param(0, doc="batches loading at once")
+        batch_rows: int = param(0, intensity="data", doc="order rows per batch")
+        days_back: int = param(0, doc="D: how far back a batch's orders reach (days)")
+        steps_per_batch: int = param(0, intensity="data", doc="exec steps a batch is split into")
+        resets_per_batch: int = param(0, intensity="branch", doc="resets to an earlier commit per batch")
     uses_spine_load = True
 
     def validate(self):

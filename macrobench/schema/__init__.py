@@ -16,6 +16,8 @@ from macrobench import task_pb2 as tp
 SCHEMA_DIR = Path(__file__).resolve().parent
 CH_SCHEMA_PATH = files("db_setup") / "ch_benchmark_schema.sql"
 
+# Deprecated SchemaConfig.extensions values -> files (the six original
+# scenarios); new scenarios are found by name, see extension_files().
 EXTENSION_FILES = {
     tp.SchemaExtension.RL_ENV_EXT: "rl_env.sql",
     tp.SchemaExtension.CONTEXT_MGMT_EXT: "context_mgmt.sql",
@@ -25,15 +27,6 @@ EXTENSION_FILES = {
     tp.SchemaExtension.DATA_AGENT_EXT: "data_agent.sql",
 }
 
-# Workload.scenario oneof field name -> the extension that scenario needs.
-SCENARIO_EXTENSIONS = {
-    "rl_env": tp.SchemaExtension.RL_ENV_EXT,
-    "context_mgmt": tp.SchemaExtension.CONTEXT_MGMT_EXT,
-    "multi_agent": tp.SchemaExtension.MULTI_AGENT_EXT,
-    "dev_agent": tp.SchemaExtension.DEV_AGENT_EXT,
-    "ops_agent": tp.SchemaExtension.OPS_AGENT_EXT,
-    "data_agent": tp.SchemaExtension.DATA_AGENT_EXT,
-}
 
 # CH tables in dependency order (seeding and FK creation follow it).
 CH_TABLES = [
@@ -63,12 +56,19 @@ def is_drop(stmt: str) -> bool:
     return stmt.upper().startswith("DROP ")
 
 
-def extensions_for(schema: tp.SchemaConfig, scenario_key: str) -> list:
-    """Extensions to create: the configured ones, else the scenario's own."""
+def extension_files(schema: tp.SchemaConfig, scenario_key: str) -> list:
+    """Extension files to load: the configured ones (SchemaConfig.extensions,
+    deprecated), else the scenario's own: its ``schema_file``, or
+    ``<key>.sql`` next to this module when that file exists. A key that is
+    not a registered scenario (the microbenchmark passes its own) gets the
+    file by name only."""
     if schema.extensions:
-        return [e for e in schema.extensions if e != tp.SchemaExtension.EXT_UNSPECIFIED]
-    ext = SCENARIO_EXTENSIONS.get(scenario_key)
-    return [ext] if ext is not None else []
+        return [EXTENSION_FILES[e] for e in schema.extensions
+                if e != tp.SchemaExtension.EXT_UNSPECIFIED]
+    from macrobench.scenarios import SCENARIOS  # here: the scenarios import this module
+    cls = SCENARIOS.get(scenario_key)
+    name = getattr(cls, "schema_file", None) or f"{scenario_key}.sql"
+    return [name] if (SCHEMA_DIR / name).is_file() else []
 
 
 def ddl_statements(schema: tp.SchemaConfig, scenario_key: str) -> list:
@@ -81,9 +81,8 @@ def ddl_statements(schema: tp.SchemaConfig, scenario_key: str) -> list:
         if schema.skip_foreign_keys:
             base = [s for s in base if not is_foreign_key(s)]
         stmts.extend(base)
-    for ext in extensions_for(schema, scenario_key):
-        path = SCHEMA_DIR / EXTENSION_FILES[ext]
-        stmts.extend(split_statements(path.read_text()))
+    for name in extension_files(schema, scenario_key):
+        stmts.extend(split_statements((SCHEMA_DIR / name).read_text()))
     if schema.custom_ddl_path:
         stmts.extend(split_statements(Path(schema.custom_ddl_path).read_text()))
     return stmts
