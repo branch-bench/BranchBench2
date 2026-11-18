@@ -1,0 +1,99 @@
+# Branchable database servers for the benchmark, one service per backend that
+# runs in a container. Versions are the ones the paper evaluated.
+#
+#   docker compose up -d doltgres          # one backend
+#   docker compose up -d                   # all of them
+#   docker compose down                    # stop (data stays in ./compose-data)
+#
+# Ports match the adapters' defaults (Chronos also needs PGSQL_USER=postgres).
+# Change a host
+# port with e.g. DOLTGRES_HOST_PORT=15432 and point the adapter at it
+# (DOLT_PORT=15432). Data lives in ./compose-data/<service> (bind mounts, so
+# the adapters can measure storage with du): set the matching *_DATA_DIR
+# variable shown below to enable storage measurement.
+#
+# Not here: Neon (hosted service), file_copy (needs PostgreSQL on a
+# reflink-capable filesystem, see guides/backends.md) and the experimental
+# backends. Chronos is a Python library; the chronos-postgres service is the
+# PostgreSQL server it runs on (install the library with `uv sync --extra chronos`).
+
+services:
+  doltgres:                      # backend "dolt" (Doltgres, PostgreSQL protocol)
+    image: dolthub/doltgresql:${DOLTGRES_VERSION:-1.4.0}
+    environment:
+      DOLTGRES_USER: postgres
+      DOLTGRES_PASSWORD: password
+    ports:
+      - "${DOLTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - ./compose-data/doltgres:/var/lib/doltgres   # DOLT_DATA_DIR=./compose-data/doltgres
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/5432'"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+  dolt:                          # backend "dolt_mysql" (Dolt, MySQL protocol)
+    image: dolthub/dolt-sql-server:${DOLT_VERSION:-2.4.2}
+    environment:
+      DOLT_ROOT_HOST: "%"        # root without a password, reachable from the host
+      DOLT_ROOT_PASSWORD: ""
+    ports:
+      - "${DOLT_HOST_PORT:-3306}:3306"
+    volumes:
+      - ./compose-data/dolt:/var/lib/dolt           # DOLT_MYSQL_DATA_DIR=./compose-data/dolt
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3306'"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+  matrixone:                     # backend "matrixone"
+    image: matrixorigin/matrixone:${MATRIXONE_VERSION:-4.2.5}
+    ports:
+      - "${MATRIXONE_HOST_PORT:-6001}:6001"         # user root, password 111
+    volumes:
+      - ./compose-data/matrixone:/mo-data           # MO_DATA_DIR=./compose-data/matrixone
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6001'"]
+      interval: 5s
+      timeout: 3s
+      retries: 120
+
+  seekdb:                        # backend "seekdb"
+    image: oceanbase/seekdb:${SEEKDB_VERSION:-1.4.0-100000172026082615}
+    environment:
+      ROOT_PASSWORD: ""          # root without a password
+      INIT_SCRIPTS_PATH: /docker-init
+      MEMORY_LIMIT: ${SEEKDB_MEMORY_LIMIT:-8G}
+    ports:
+      - "${SEEKDB_HOST_PORT:-2881}:2881"
+    volumes:
+      - ./compose-data/seekdb:/var/lib/seekdb       # SEEKDB_DATA_DIR=./compose-data/seekdb/store
+      - ./compose/seekdb-init:/docker-init:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -h127.0.0.1 -P2881 -uroot -e 'SELECT 1'"]
+      interval: 5s
+      timeout: 3s
+      retries: 120
+
+  chronos-postgres:              # backend "chronos" (the library runs on this server)
+    image: postgres:${CHRONOS_PG_VERSION:-18.6}
+    environment:
+      POSTGRES_USER: postgres
+      # Trust auth like the PostgreSQL that dblib/systems/chronos/start runs;
+      # set PGSQL_USER=postgres for the adapter.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    # Chronos keeps one interval table per table and branch; a transaction can
+    # touch hundreds of relations, so the default lock table (64 per
+    # connection) runs out under concurrent workers.
+    command: ["postgres", "-c", "max_connections=400", "-c", "max_locks_per_transaction=1024"]
+    ports:
+      - "${CHRONOS_HOST_PORT:-5433}:5432"          # the adapter's default port
+    volumes:
+      - ./compose-data/chronos-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 60

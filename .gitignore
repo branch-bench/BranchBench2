@@ -218,3 +218,5 @@ db_setup/BIRD-Critic-sol
 
 # MacOS specific files
 *.DS_Store
+# docker compose data (bind mounts)
+compose-data/
