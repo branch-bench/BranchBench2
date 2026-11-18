@@ -3,7 +3,7 @@
 Bauplan is a lakehouse (Iceberg tables over S3) with git-like branches,
 commits, tags and merges in its catalog. It has no SQL writes: query() is
 read-only, and data enters a table only from Parquet files in S3
-(create_table / import_data) or from pipeline runs. The verbs map as:
+(create_table / import_data) or from pipeline runs. The branch operations map as:
 
     branch     create_branch(<user>.<db>__<name>, from_ref=<branch or tag>)
     commit     create_tag(<user>.<db>.c<id>[.m<base32 message>], from_ref=branch)

@@ -59,7 +59,7 @@
 # points (after setup, after the workflow, after GC, after cleanup) and
 # samples it every 5 s during the scenario (--storage-sample-interval
 # changes that; 0 turns sampling off). --measure-storage additionally
-# measures around every verb and exec on the local backends (two directory
+# measures around every branch operation and exec on the local backends (two directory
 # walks per operation, slow, and not attributable under concurrent workers)
 # and on Neon fetches the project's consumption metrics after the run,
 # which waits 15 min for them to appear. Off by default.

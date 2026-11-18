@@ -80,7 +80,7 @@ DEFAULT_OP_STALL_SEC = 600.0
 
 
 class StallWatchdog(threading.Thread):
-    """Cancels any single operation (a verb or an exec) that has been
+    """Cancels any single operation (a branch operation or an exec) that has been
     running for longer than ``threshold``: the operation fails with a
     note naming the stall, and the workflow goes on, so what follows
     (later failures, invariant results) is recorded too. Checks every
@@ -146,7 +146,8 @@ def storage_sample_interval(config, cli_value) -> float:
 
 
 def implementation_report(suite_type) -> dict:
-    """How a suite realises each verb (native, simulated or unsupported)."""
+    """How a suite realises each branch operation (native, composed, simulated
+    or unsupported). The key stays "verbs": the leaderboard reads it."""
     return {
         "verbs": suite_type.implementation(),
         "notes": dict(suite_type.IMPLEMENTATION_NOTES),
@@ -200,7 +201,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-runtime-sec", type=int, default=0,
                         help="Cap the scenario runtime in seconds (0 = no limit).")
     parser.add_argument("--op-stall-sec", type=float, default=DEFAULT_OP_STALL_SEC,
-                        help="Cancel one operation (verb or exec) once it has run longer than "
+                        help="Cancel one operation (branch operation or exec) once it has run longer than "
                              "this many seconds; it fails and the run goes on "
                              f"(default {DEFAULT_OP_STALL_SEC:g}; 0 = off).")
     parser.add_argument("--storage-sample-interval", type=float, default=None,
@@ -390,7 +391,7 @@ def _run(args: argparse.Namespace, config: tp.MacroBenchConfig, *,
         if status == "completed" and stopped:
             status = "interrupted"
         if ctx.unsupported_abort:
-            # The first unsupported verb ended the run (see scenarios/base.py).
+            # The first unsupported branch operation ended the run (see scenarios/base.py).
             status = f"unsupported: {ctx.unsupported_abort}"
         # The scenario ran to its end, but an operation the watchdog
         # cancelled never finished: the workflow is incomplete.

@@ -22,7 +22,7 @@ each branch is its own database: `main` is `<db_name>`, and branch `X` is
 drop). A multi-branch script addresses another branch as
 `` `<db>__<branch>`.`<table>` ``.
 
-SeekDB has no commits, so the history verbs are built from two primitives it
+SeekDB has no commits, so the history branch operations are built from two primitives it
 does have: `current_scn()` with flashback reads (`<table> AS OF SNAPSHOT
 <scn>`), and database forks.
 
@@ -44,7 +44,7 @@ does have: `current_scn()` with flashback reads (`<table> AS OF SNAPSHOT
   forced onto the primary key (`/*+ INDEX(fb PRIMARY) */`). A snapshot that
   is still unreadable (an index build in progress, a narrowed column) makes
   a restore keep the table's current rows, and a merge or rebase use the
-  fallback fork point or, failing that, a two-way merge for it; the verb's
+  fallback fork point or, failing that, a two-way merge for it; the branch operation's
   result lists the table (`not_restored`, `fallback_base_tables`,
   `two_way_tables`) with a warning.
 - `merge()` and `rebase()` are a SQL three-way merge: base = the fork point
@@ -55,7 +55,7 @@ does have: `current_scn()` with flashback reads (`<table> AS OF SNAPSHOT
   both sides is a conflict, resolved per `on_conflict` (a callable gets rows
   in Dolt's `base_*` / `our_*` / `their_*` shape). Tables and columns added
   on one side are added to the other; a differing primary key is a schema
-  conflict and the verb fails without touching data. Tables without a
+  conflict and the branch operation fails without touching data. Tables without a
   primary key (`history`) only receive the other side's new rows. `rebase()`
   reads the upstream at one SCN, which becomes the branch's new fork point,
   and the merge after it is then a fast-forward.

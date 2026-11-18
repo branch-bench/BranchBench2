@@ -33,7 +33,7 @@ provide the reusable provider operations. A custom caller can still supply
 its own `PreparedTarget` without changing the runners.
 
 Adapters read provider connection settings from the process environment.
-`DBFORK_NATIVE_ONLY` reports simulated verbs as unsupported.
+`DBFORK_NATIVE_ONLY` reports simulated branch operations as unsupported.
 `MACRO_SPILL_ROWS` controls when the macrobench collector spills rows to parquet.
 
 Packaged resources: the macrobench presets

@@ -23,8 +23,8 @@ Everything beyond branch and delete is built on that clone, on
   backend keeps every connection it opens in a process-wide registry: a
   clone closes the idle connections to its template (a parked connection
   reopens on its next use, recorded as a `CONNECT`), waits for the busy
-  ones (a verb or exec in flight) and holds new ones back until the copy is
-  done. The wait is part of the verb's latency; the e2e stats'
+  ones (a branch operation or exec in flight) and holds new ones back until the copy is
+  done. The wait is part of the branch operation's latency; the e2e stats'
   `backend_observations` count `parked_connections`, `quiesce_waits`,
   `quiesce_wait_sec` and `clone_retries`.
 - `commit()` (simulated): a row in the branch's `_bb_commits` table, then a

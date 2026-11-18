@@ -5,7 +5,7 @@ once, before the run starts, by :func:`apply_intensity`. They multiply the
 explicit knobs in place so the scenarios never see them and the e2e stats
 record the effective values.
 
-branch_intensity scales the number of branch verbs a scenario issues:
+branch_intensity scales the number of branch operations a scenario issues:
 
 * ``branch_ops.commit_interval`` is divided (more commits per step).
 * Scenario counts of branches, forks, rounds, rebases, investigation

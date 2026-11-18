@@ -11,7 +11,7 @@ The mapping is derived from the names alone, so every worker (each with its
 own connection) resolves the same branch to the same database with no shared
 state.
 
-SeekDB has no commits of its own. The verbs that need them are built from
+SeekDB has no commits of its own. The branch operations that need them are built from
 two primitives it does have:
 
 * ``current_scn()`` and flashback reads (``<table> AS OF SNAPSHOT <scn>``),
@@ -42,7 +42,7 @@ key; tables without one, like ``history``, only receive the other side's new
 rows). Conflicts are rows both sides changed differently; ``on_conflict``
 decides ("ours" | "theirs" | callable, see dblib.db_api). A table whose
 columns were added on one side gets those columns on the other; a differing
-primary key is a schema conflict and the verb fails without touching data.
+primary key is a schema conflict and the operation fails without touching data.
 
 Native-only mode (``DBFORK_NATIVE_ONLY=1``) switches merge() to SeekDB's own
 ``MERGE TABLE ... STRATEGY OURS|THEIRS`` per table, which has no common

@@ -2,7 +2,7 @@
 
 The macrobenchmark runs one of six agent-workflow scenarios (BranchBench
 S1-S6) against a backend through the git-like API, and records every branch
-op and every statement, which verbs the backend could not perform, and
+op and every statement, which branch operations the backend could not perform, and
 whether the sentinel-based invariance checks held.
 
 | Scenario | Key | Shape | Branch ops |
@@ -53,7 +53,7 @@ workload {
   fan-out, cycles, D, p, ...).
 - `workload.branch_intensity` and `workload.data_intensity` are multipliers
   applied on top of the explicit knobs before the run (0 or 1 = unchanged).
-  Branch intensity scales the number of branch verbs (branches, forks,
+  Branch intensity scales the number of branch operations (branches, forks,
   rounds, rebases, investigation points) and divides `commit_interval`;
   data intensity scales the SQL per branch (statements per step, rows per
   write, spine clients, per-branch steps and rows). Thread counts, caps and
@@ -79,7 +79,7 @@ workload {
 | `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `file_copy`, `chronos`, `bauplan` (`xata` is experimental; see [backends.md](backends.md)) |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
 | `--max-runtime-sec N` | runtime cap; default one hour times the largest of the scale factor and the intensity multipliers (3600 s at scale 1, intensity 1), 0 = no cap. A run that reaches it (or gets Ctrl-C / SIGTERM) is recorded as `interrupted` with its rows and stats written |
-| `--op-stall-sec N` | stall limit for one operation: a verb or an exec that has been running longer than this (default 600 s, 0 = off) is cancelled and recorded `FAILED` with a `stalled: cancelled after Ns` note; the run goes on, so later failures and invariant results are recorded too; the e2e stats list the cancelled operations under `stalls` with their outcome (`failed`, or `completed` when it finished before the cancel landed), and a run with a cancelled operation that failed ends with status `incomplete` instead of `completed` |
+| `--op-stall-sec N` | stall limit for one operation: a branch operation or an exec that has been running longer than this (default 600 s, 0 = off) is cancelled and recorded `FAILED` with a `stalled: cancelled after Ns` note; the run goes on, so later failures and invariant results are recorded too; the e2e stats list the cancelled operations under `stalls` with their outcome (`failed`, or `completed` when it finished before the cancel landed), and a run with a cancelled operation that failed ends with status `incomplete` instead of `completed` |
 | `--storage-sample-interval SEC` | seconds between background storage samples (default 5, 0 = off) |
 | `--measure-storage` | also measure storage around every operation |
 
@@ -94,10 +94,10 @@ uv run python -m macrobench.runner --config macrobench/configs/ops_agent_mini.te
     --backend dolt --db-name macro_ops --outdir run_stats
 ```
 
-**An unsupported operation stops the run.** A backend that lacks a verb
-does not run the scenario past it: the verb is recorded as UNSUPPORTED, every
+**An unsupported operation stops the run.** A backend that lacks a branch operation
+does not run the scenario past it: the branch operation is recorded as UNSUPPORTED, every
 worker is cancelled, `workflow_supported` is false and `status` is
-`unsupported: <VERB>: <reason>` in the e2e stats. Failed operations, by
+`unsupported: <OPERATION>: <reason>` in the e2e stats. Failed operations, by
 contrast, never stop a run; the invariant checks report their effect. Add
 `DBFORK_NATIVE_ONLY=1` (or `--native-only` below) to treat every simulated
 operation as unsupported and see how far each system gets on its own
@@ -140,7 +140,7 @@ e2e = runner.run(["--config", "macrobench/configs/rl_env_mini.textproto", "--out
 | `--config` | the `MacroBenchConfig` textproto; the packaged presets are `importlib.resources.files("macrobench") / "configs"` |
 | `--outdir` | where the parquet and e2e stats files go (default `/tmp/run_stats`) |
 | `--max-runtime-sec N` | runtime cap, 0 = no cap. A run that reaches it (or gets Ctrl-C / SIGTERM) is recorded as `interrupted` with its rows and stats written |
-| `--op-stall-sec N` | stall limit for one operation: a verb or an exec that has been running longer than this (default 600 s, 0 = off) is cancelled and recorded `FAILED` with a `stalled: cancelled after Ns` note; the run goes on, so later failures and invariant results are recorded too; the e2e stats list the cancelled operations under `stalls` with their outcome (`failed`, or `completed` when it finished before the cancel landed), and a run with a cancelled operation that failed ends with status `incomplete` instead of `completed` |
+| `--op-stall-sec N` | stall limit for one operation: a branch operation or an exec that has been running longer than this (default 600 s, 0 = off) is cancelled and recorded `FAILED` with a `stalled: cancelled after Ns` note; the run goes on, so later failures and invariant results are recorded too; the e2e stats list the cancelled operations under `stalls` with their outcome (`failed`, or `completed` when it finished before the cancel landed), and a run with a cancelled operation that failed ends with status `incomplete` instead of `completed` |
 | `--storage-sample-interval SEC` | seconds between background storage samples (default 5, 0 = off) |
 | `--measure-storage` | also measure storage around every operation |
 | `--no-progress` | no progress bar |
@@ -168,7 +168,7 @@ A background sampler also records the size every 5 s during the scenario
 (`storage.samples`, wall-clock seconds and bytes); `--storage-sample-interval
 SEC` changes the interval (`0` turns it off), as does
 `storage_sample_interval_sec` in the config. `--measure-storage` additionally
-measures before and after every verb and every exec() call (two directory
+measures before and after every branch operation and every exec() call (two directory
 walks per operation; off by default, and not attributable under concurrent
 workers). The report's `storage.png` draws the sampled series with the workflow-level
 points as markers; `summary.md` carries them as `storage_after_*_mb`.
@@ -182,7 +182,7 @@ run_stats/
 ```
 
 The e2e stats carry the workload parameters, the seed statistics,
-`capabilities` and `implementation` (how the backend realises each verb:
+`capabilities` and `implementation` (how the backend realises each branch operation:
 native, composed or simulated), `workflow_supported` with `unsupported_ops`
 and `op_status_counts`, the `invariants` results, the scenario's own
 `metrics` (e.g. S3 merge order and conflicts, S5 time to recovery, S6

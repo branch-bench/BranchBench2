@@ -8,12 +8,12 @@ reads the versions containing its branch point, so a fork is a metadata
 transaction and a read is a range predicate. The library speaks its own
 API (``ChronosBranchContext``: ``create_branch``, ``checkout`` sessions
 with ``query``/``execute``, ``create_checkpoint``, ``diff``, ``merge_apply``,
-``delete_branch``), so this backend is a shim that maps the suite's verbs
+``delete_branch``), so this backend is a shim that maps the suite's branch operations
 and the workload's SQL onto that API. What is native, composed or simulated
 is listed in ``IMPLEMENTATION`` / ``IMPLEMENTATION_NOTES`` below.
 
 Setup ("adoption"): the run's schema and seed data are loaded as ordinary
-PostgreSQL tables (full SQL); the first versioning verb registers every
+PostgreSQL tables (full SQL); the first branch operation registers every
 table with Chronos (its rows are copied into the interval table, the
 original is dropped) -- the integration path the Chronos docs describe.
 From then on every statement goes through a Chronos branch session.
@@ -649,7 +649,7 @@ class ChronosToolSuite(DBToolSuite):
         self._rowid_tables = {r[0] for r in self._pgx(f"SELECT name FROM {ROWID_TABLES}") or []}
 
     def _adopt(self) -> None:
-        """Register every table with Chronos (first versioning verb)."""
+        """Register every table with Chronos (first branch operation)."""
         if self.adopted:
             return
         key = f"bb_adopt_{self.db_name}"
@@ -1617,7 +1617,7 @@ class ChronosToolSuite(DBToolSuite):
         return info
 
     # ------------------------------------------------------------------
-    # Verbs
+    # Branch operations
     # ------------------------------------------------------------------
 
     def list_branches(self) -> list:

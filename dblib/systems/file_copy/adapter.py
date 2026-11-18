@@ -36,7 +36,7 @@ A template must have no other connection while it is copied. The backend
 therefore keeps every connection it opens in a process-wide registry: a
 clone closes the registered connections to its template that are idle
 (a parked connection reopens on its next use; the CONNECT is recorded),
-waits for the busy ones (a verb or exec in flight) to finish, and holds
+waits for the busy ones (a branch operation or exec in flight) to finish, and holds
 new connections to the template back until the copy is done. The wait is
 part of the clone's latency, as it would be in production.
 
@@ -179,7 +179,7 @@ class _Handle:
     """A lazily (re)connected autocommit connection to one database, kept
     in the process-wide registry so a clone of that database can park it.
 
-    ``busy`` counts open cursors and verb/exec holds; a handle is parked
+    ``busy`` counts open cursors and branch-operation/exec holds; a handle is parked
     (its connection closed) only at zero. A connect waits while a clone of
     the database is in progress."""
 
@@ -345,7 +345,7 @@ class FileCopyToolSuite(PgMergeMixin, DBToolSuite):
                   f"(file_copy_method = {FILE_COPY_METHOD}); a fork from a branch head also clones "
                   "the child as the merge base (a fork from a commit uses the commit's snapshot). "
                   "The template may have no other connection: idle connections to it are closed "
-                  "(reopened on their next use), busy ones are waited for, inside the verb",
+                  "(reopened on their next use), busy ones are waited for, inside the operation",
         "commit": "_bb_commits row, then a clone of the branch database as the commit's snapshot "
                   "(two checkpoints and one reflink per data file; the branch's connections are "
                   "parked meanwhile). Before any clone, tables of the template that were never "
@@ -460,9 +460,9 @@ class FileCopyToolSuite(PgMergeMixin, DBToolSuite):
             return None
 
     def _handle(self, db: str, fresh: bool = False) -> _Handle:
-        """A held connection to ``db`` for the duration of a verb (released
+        """A held connection to ``db`` for the duration of a branch operation (released
         with _release_handle); self.conn when it is already there unless
-        ``fresh``. The verbs' own sessions may write (temp tables, foreign
+        ``fresh``. The operations' own sessions may write (temp tables, foreign
         tables) even on a read-only snapshot database."""
         if not fresh and self.conn is not None and self.conn.db == db and not self.conn.closed:
             return self.conn
@@ -872,7 +872,7 @@ class FileCopyToolSuite(PgMergeMixin, DBToolSuite):
         self._admin("CHECKPOINT")
 
     # ------------------------------------------------------------------
-    # Verbs
+    # Branch operations
     # ------------------------------------------------------------------
 
     def _branch_impl(self, name: str, from_ref: Ref) -> None:

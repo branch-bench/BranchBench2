@@ -23,7 +23,7 @@ is `<db_name>__X`), and a multi-branch script addresses another branch as
 `` `<db>__<branch>`.`<table>` `` or a commit as `` `<db>`.`<table>`{snapshot = '...'} ``.
 
 A commit is a database snapshot; its message and order live in the branch
-database's `_bb_commits` table, which branches inherit. Per verb
+database's `_bb_commits` table, which branches inherit. Per branch operation
 (`MatrixOneToolSuite.IMPLEMENTATION` / `IMPLEMENTATION_NOTES` carry the
 same summary for the report):
 
@@ -40,7 +40,7 @@ same summary for the report):
   A callable runs over the SKIP result. Tables and columns the source has
   and the target lacks are added first (`DATA BRANCH CREATE TABLE ... FROM`,
   `ALTER TABLE ADD COLUMN`); a differing primary key is a schema conflict
-  and the verb fails without touching data. Set `MO_COUNT_CONFLICTS=0` to
+  and the branch operation fails without touching data. Set `MO_COUNT_CONFLICTS=0` to
   skip the conflict count when `on_conflict` is "ours"/"theirs".
 - `rebase()` (simulated): a re-fork. A temporary clone of the upstream's
   head snapshot receives the branch's delta since its fork point through

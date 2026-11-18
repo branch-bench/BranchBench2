@@ -1,6 +1,6 @@
 """chronos backend against a live PostgreSQL server (skipped when none
 answers on PGSQL_HOST:PGSQL_PORT or chronos_core is not installed).
-Exercises every verb through the public API plus the SQL shim."""
+Exercises every branch operation through the public API plus the SQL shim."""
 
 import pytest
 
@@ -49,7 +49,7 @@ def test_implementation_summary():
 
 
 def test_adoption_and_sql_shim(suite):
-    # Plain mode until the first verb; the commit adopts every table.
+    # Plain mode until the first branch operation; the commit adopts every table.
     c0 = ok(suite.commit(MAIN, "seed")).value
     assert suite.adopted
     assert sorted(rows(suite, MAIN, "SELECT id, v FROM t ORDER BY id")) == [(1, "a"), (2, "b"), (3, "c")]

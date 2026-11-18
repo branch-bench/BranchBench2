@@ -1,6 +1,6 @@
 """Neon backend against the real service. Billable: runs only with
 DBFORK_LIVE_TESTS=1 and NEON_API_KEY_ORG set. Creates one scratch project,
-exercises every verb, deletes the project."""
+exercises every branch operation, deletes the project."""
 
 import os
 

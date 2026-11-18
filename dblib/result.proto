@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package dblib;
 
-// One row per measured operation. Every git-like verb (branch, commit, ...)
+// One row per measured operation. Every git-like branch operation (branch, commit, ...)
 // produces one row. exec() produces a CONNECT row per branch switch, one row
 // per SQL statement the script ran (READ/INSERT/UPDATE/DDL), and one EXEC row
 // summarising the whole script run on that ref.
@@ -84,7 +84,7 @@ message Result {
 enum OpType {
   UNSPECIFIED = 0;
 
-  // Git-like verbs
+  // Git-like branch operations
   BRANCH = 1;
   COMMIT = 2;
   DIFF = 3;

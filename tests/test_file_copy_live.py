@@ -1,5 +1,5 @@
 """file_copy backend against a live PostgreSQL server (skipped when none
-answers on PGSQL_HOST:PGSQL_PORT). Exercises every verb through the public
+answers on PGSQL_HOST:PGSQL_PORT). Exercises every branch operation through the public
 API, including the connection parking a clone needs."""
 
 import threading

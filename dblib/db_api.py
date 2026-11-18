@@ -1,17 +1,17 @@
 """Git-like API over branchable databases.
 
 A backend subclasses DBToolSuite and implements the protected ``_*_impl``
-hooks it supports. The public verbs (branch, commit, diff, log, merge,
-rebase, revert, reset, delete) wrap those hooks with timing, storage
+hooks it supports. The public branch operations (branch, commit, diff, log,
+merge, rebase, revert, reset, delete) wrap those hooks with timing, storage
 measurement and result recording, and ``exec()`` runs a workload script on
 one or more branches.
 
 Status handling
 ---------------
-Every verb returns an OpResult instead of raising. A hook the backend did
-not override raises UnsupportedOperation, which the verb turns into an
-UNSUPPORTED row (zero latency, no storage delta). An unsupported operation
-ends the workflow: the result collector notifies the driver
+Every branch operation returns an OpResult instead of raising. A hook the
+backend did not override raises UnsupportedOperation, which the operation
+turns into an UNSUPPORTED row (zero latency, no storage delta). An
+unsupported operation ends the workflow: the result collector notifies the driver
 (``on_unsupported``), and the macrobenchmark cancels every worker and
 records the run as unsupported. A hook that raised anything else produces a
 FAILED row carrying the error; failures do not stop a run. Pass
@@ -55,7 +55,7 @@ backend's base/our/their columns). The callable resolves conflicts with SQL
 through ``db.sql()`` and calls ``db.resolve(table)`` for each table it
 settled; whatever it leaves unresolved is resolved as "ours".
 Schema conflicts cannot be resolved this way: the backend aborts the
-operation and the verb is recorded as FAILED with the reason.
+operation and it is recorded as FAILED with the reason.
 """
 
 import inspect
@@ -73,7 +73,7 @@ from dblib import result_pb2 as rslt
 OpStatus = rslt.OpStatus
 OpType = rslt.OpType
 
-VERBS = (
+BRANCH_OPS = (
     "branch",
     "commit",
     "diff",
@@ -84,8 +84,10 @@ VERBS = (
     "reset",
     "delete",
 )
+# Deprecated name of BRANCH_OPS, kept for code written against older versions.
+VERBS = BRANCH_OPS
 
-_VERB_OP_TYPES = {
+_BRANCH_OP_TYPES = {
     "branch": OpType.BRANCH,
     "commit": OpType.COMMIT,
     "diff": OpType.DIFF,
@@ -102,7 +104,7 @@ class OperationCancelled(RuntimeError):
     """The operation was aborted (a stall watchdog cancelled it)."""
 
 
-# Native-only mode: every verb an adapter simulates is treated as
+# Native-only mode: every branch operation an adapter simulates is treated as
 # unsupported, so a run shows what the engine does on its own. Read at call
 # time so tests can toggle it.
 NATIVE_ONLY = os.environ.get("DBFORK_NATIVE_ONLY", "").lower() in ("1", "true", "yes")
@@ -168,7 +170,7 @@ def check_conflict_policy(on_conflict: ConflictPolicy) -> ConflictPolicy:
 
 @dataclass
 class OpResult:
-    """Outcome of one verb, one statement, or one exec() on one ref."""
+    """Outcome of one branch operation, one statement, or one exec() on one ref."""
 
     op: str
     status: int = OpStatus.OK
@@ -406,7 +408,7 @@ class DBToolSuite(ABC):
     """Git-like interface to one branchable database.
 
     One instance per worker thread. ``self.conn`` is the DB-API connection
-    the sync verbs and exec() use; ``_connect_impl`` points it at a ref.
+    the sync branch operations and exec() use; ``_connect_impl`` points it at a ref.
     """
 
     BACKEND_NAME = "base"
@@ -427,7 +429,7 @@ class DBToolSuite(ABC):
     ):
         self.conn = connection
         self.result_collector = result_collector or rc.ResultCollector()
-        # Default for the ``storage`` argument of every verb and exec().
+        # Default for the ``storage`` argument of every branch operation and exec().
         self.measure_storage = measure_storage
         self.async_pool = None
         # Ref the sync connection is on, or None if unknown.
@@ -439,52 +441,53 @@ class DBToolSuite(ABC):
     # ------------------------------------------------------------------
 
     @classmethod
-    def supports(cls, verb: str) -> bool:
-        """Whether this backend overrides the hook for ``verb``."""
-        if verb == "commit_refs":
+    def supports(cls, op: str) -> bool:
+        """Whether this backend overrides the hook for ``op``."""
+        if op == "commit_refs":
             return cls.SUPPORTS_COMMIT_REFS
-        if verb == "multi_ref_exec":
+        if op == "multi_ref_exec":
             return cls.SUPPORTS_MULTI_REF_EXEC
-        if verb == "exec_async":
+        if op == "exec_async":
             return cls.open_async_pool is not DBToolSuite.open_async_pool
-        hook = f"_{verb}_impl"
+        hook = f"_{op}_impl"
         return getattr(cls, hook, None) is not getattr(DBToolSuite, hook, None)
 
     @classmethod
     def capabilities(cls) -> dict:
-        caps = {verb: cls.supports(verb) for verb in VERBS}
+        caps = {op: cls.supports(op) for op in BRANCH_OPS}
         caps["commit_refs"] = cls.SUPPORTS_COMMIT_REFS
         caps["multi_ref_exec"] = cls.SUPPORTS_MULTI_REF_EXEC
         caps["exec_async"] = cls.supports("exec_async")
         return caps
 
-    # How each supported verb is realised, for the report: "native" (the
+    # How each supported branch operation is realised, for the report: "native" (the
     # engine holds the versions and does the work; the adapter only records
     # a handle) or "simulated" (the adapter materialises or computes the
     # result with SQL, copies or foreign tables). Backends list only the
-    # verbs that are not "native". In native-only mode (DBFORK_NATIVE_ONLY=1)
-    # every simulated verb is reported and executed as unsupported.
+    # operations that are not "native". In native-only mode
+    # (DBFORK_NATIVE_ONLY=1) every simulated operation is reported and
+    # executed as unsupported.
     IMPLEMENTATION: dict = {}
-    # Free-text detail per verb (optional).
+    # Free-text detail per operation (optional).
     IMPLEMENTATION_NOTES: dict = {}
 
     @classmethod
-    def _is_native(cls, verb: str) -> bool:
-        return cls.IMPLEMENTATION.get(verb, "native") == "native"
+    def _is_native(cls, op: str) -> bool:
+        return cls.IMPLEMENTATION.get(op, "native") == "native"
 
     @classmethod
-    def _available(cls, verb: str) -> bool:
+    def _available(cls, op: str) -> bool:
         """Supported by the adapter and, in native-only mode, native."""
-        return cls.supports(verb) and (not native_only() or cls._is_native(verb))
+        return cls.supports(op) and (not native_only() or cls._is_native(op))
 
     @classmethod
     def implementation(cls) -> dict:
         out = {}
-        for verb in VERBS + ("commit_refs", "multi_ref_exec"):
-            if not cls._available(verb):
-                out[verb] = "unsupported"
+        for op in BRANCH_OPS + ("commit_refs", "multi_ref_exec"):
+            if not cls._available(op):
+                out[op] = "unsupported"
             else:
-                out[verb] = cls.IMPLEMENTATION.get(verb, "native")
+                out[op] = cls.IMPLEMENTATION.get(op, "native")
         return out
 
     def _unsupported(self, op: str, reason: str = "") -> UnsupportedOperation:
@@ -588,7 +591,7 @@ class DBToolSuite(ABC):
         (_schema_diff_impl) under ``value["schema"]``. Native-only mode
         keeps a simulated schema half out, so an engine whose diff covers
         rows only answers rows only, and the checks that need the schema
-        fail rather than the verb."""
+        fail rather than the operation."""
         value = self._diff_impl(ref_a, ref_b)
         if not isinstance(value, dict):
             value = {"value": value}
@@ -613,7 +616,7 @@ class DBToolSuite(ABC):
 
     def _conflict_session(self, ref: Ref, label: str = "resolve") -> "Session":
         """Session a conflict-resolution callable gets. Its statements are
-        recorded with the given label inside the verb's latency."""
+        recorded with the given label inside the operation's latency."""
         return Session(self, self.conn, ref, [ref],
                        self.result_collector.next_exec_id(), True, label, 0)
 
@@ -685,7 +688,7 @@ class DBToolSuite(ABC):
         """Abort the operation this suite is running: cancel the statement
         on its connection (where the driver supports it) and make the
         backend's wait loops raise OperationCancelled at their next check.
-        The verb or exec then fails and the workflow goes on."""
+        The branch operation or exec then fails and the workflow goes on."""
         self._cancel_requested = True
         conn = getattr(self, "conn", None)
         cancel = getattr(conn, "cancel", None)
@@ -739,7 +742,7 @@ class DBToolSuite(ABC):
         return r, False
 
     # ------------------------------------------------------------------
-    # Public verbs
+    # Public branch operations
     # ------------------------------------------------------------------
 
     @property
@@ -747,19 +750,19 @@ class DBToolSuite(ABC):
         """Ref the sync connection is on."""
         return self._current_ref
 
-    def _run_verb(self, verb: str, fn: Callable, ref: Optional[Ref], *,
-                  timed: bool, storage: Optional[bool], label: str,
-                  raise_on_error: bool, fallback: bool = False) -> OpResult:
-        op_type = _VERB_OP_TYPES[verb]
+    def _run_branch_op(self, op: str, fn: Callable, ref: Optional[Ref], *,
+                       timed: bool, storage: Optional[bool], label: str,
+                       raise_on_error: bool, fallback: bool = False) -> OpResult:
+        op_type = _BRANCH_OP_TYPES[op]
         storage = self.measure_storage if storage is None else storage
         before = self._safe_storage() if storage else 0
         status, value, error, exc = OpStatus.OK, None, "", None
         start_wall = time.time()
         start = time.perf_counter()
-        token = self._begin_op(verb.upper(), str(ref) if ref else "", label)
+        token = self._begin_op(op.upper(), str(ref) if ref else "", label)
         try:
-            if native_only() and not self._is_native(verb):
-                raise self._unsupported(verb, "simulated by the adapter; native-only mode")
+            if native_only() and not self._is_native(op):
+                raise self._unsupported(op, "simulated by the adapter; native-only mode")
             value = fn()
         except UnsupportedOperation as e:
             status, error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
@@ -779,7 +782,7 @@ class DBToolSuite(ABC):
                 num_keys_touched=0,
             )
         result = OpResult(
-            op=verb, status=status, ref=str(ref) if ref else "",
+            op=op, status=status, ref=str(ref) if ref else "",
             latency=latency, storage_before=before, storage_after=after,
             value=value, error=error,
         )
@@ -792,7 +795,7 @@ class DBToolSuite(ABC):
                raise_on_error: bool = False) -> OpResult:
         """Create branch ``name`` from ``from_ref`` (default: current ref)."""
         src, fallback = self._resolve(from_ref)
-        return self._run_verb(
+        return self._run_branch_op(
             "branch", lambda: self._branch_impl(name, src), src, timed=timed,
             storage=storage, label=label, raise_on_error=raise_on_error,
             fallback=fallback,
@@ -803,7 +806,7 @@ class DBToolSuite(ABC):
                raise_on_error: bool = False) -> OpResult:
         """Snapshot ``ref``. The result's value is the commit id."""
         r, fallback = self._resolve(ref)
-        return self._run_verb(
+        return self._run_branch_op(
             "commit", lambda: self._commit_impl(r, message), r, timed=timed,
             storage=storage, label=label, raise_on_error=raise_on_error,
             fallback=fallback,
@@ -820,7 +823,7 @@ class DBToolSuite(ABC):
         native-only run uses an engine diff that covers rows only."""
         a, fa = self._resolve(ref_a)
         b, fb = self._resolve(ref_b)
-        return self._run_verb(
+        return self._run_branch_op(
             "diff", lambda: self._diff_with_schema(a, b), b, timed=timed,
             storage=storage, label=label, raise_on_error=raise_on_error,
             fallback=fa or fb,
@@ -831,7 +834,7 @@ class DBToolSuite(ABC):
             raise_on_error: bool = False) -> OpResult:
         """Recent commits on ``ref`` (value is a list of dicts)."""
         r, fallback = self._resolve(ref)
-        return self._run_verb(
+        return self._run_branch_op(
             "log", lambda: self._log_impl(r, limit), r, timed=timed,
             storage=storage, label=label, raise_on_error=raise_on_error,
             fallback=fallback,
@@ -847,7 +850,7 @@ class DBToolSuite(ABC):
         check_conflict_policy(on_conflict)
         dst, fd = self._resolve(into)
         src, fs = self._resolve(source)
-        return self._run_verb(
+        return self._run_branch_op(
             "merge", lambda: self._merge_impl(dst, src, message, on_conflict),
             dst, timed=timed, storage=storage, label=label,
             raise_on_error=raise_on_error, fallback=fd or fs,
@@ -862,7 +865,7 @@ class DBToolSuite(ABC):
         check_conflict_policy(on_conflict)
         r, fr = self._resolve(ref)
         o, fo = self._resolve(onto)
-        return self._run_verb(
+        return self._run_branch_op(
             "rebase", lambda: self._rebase_impl(r, o, on_conflict), r,
             timed=timed, storage=storage, label=label,
             raise_on_error=raise_on_error, fallback=fr or fo,
@@ -873,7 +876,7 @@ class DBToolSuite(ABC):
                raise_on_error: bool = False) -> OpResult:
         """Add a commit to ``ref`` that undoes ``commit``."""
         r, fallback = self._resolve(ref)
-        return self._run_verb(
+        return self._run_branch_op(
             "revert", lambda: self._revert_impl(r, commit), r, timed=timed,
             storage=storage, label=label, raise_on_error=raise_on_error,
             fallback=fallback,
@@ -885,7 +888,7 @@ class DBToolSuite(ABC):
         """Move ``ref`` to ``to`` (a commit id, or whatever the backend
         accepts as a point to restore), discarding later changes."""
         r, fallback = self._resolve(ref)
-        return self._run_verb(
+        return self._run_branch_op(
             "reset", lambda: self._reset_impl(r, to), r, timed=timed,
             storage=storage, label=label, raise_on_error=raise_on_error,
             fallback=fallback,
@@ -895,7 +898,7 @@ class DBToolSuite(ABC):
                label: str = "", raise_on_error: bool = False) -> OpResult:
         """Delete branch ``ref``."""
         r, fallback = self._resolve(ref)
-        return self._run_verb(
+        return self._run_branch_op(
             "delete", lambda: self._delete_impl(r.head()), r, timed=timed,
             storage=storage, label=label, raise_on_error=raise_on_error,
             fallback=fallback,

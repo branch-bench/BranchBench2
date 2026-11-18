@@ -136,8 +136,8 @@ class DoltToolSuite(DBToolSuite):
 
     def _on(self, ref: Ref) -> None:
         """Make sure the sync connection is checked out on ref's branch.
-        Verbs that act on a checked-out branch (commit, merge, ...) call
-        this; the switch counts towards the verb's latency."""
+        Branch operations that act on a checked-out branch (commit, merge, ...)
+        call this; the switch counts towards the operation's latency."""
         if self._current_ref != Ref(ref.branch):
             self._checkout(ref.branch)
             self._current_ref = Ref(ref.branch)

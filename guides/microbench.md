@@ -165,9 +165,9 @@ Use `scripts/run_single_thread_bench.sh` to measure single-threaded operation la
 | Branch | `BRANCH_CREATE`, `BRANCH_CONNECT`, `BRANCH_DELETE`, `BRANCH_COMMIT`, `BRANCH_DIFF`, `BRANCH_LOG`, `BRANCH_MERGE`, `BRANCH_REBASE`, `BRANCH_REVERT`, `BRANCH_RESET` |
 | Schema | the `DDL_*` operations |
 
-The branch group covers the nine verbs of the shared API (`dblib/db_api.py`)
+The branch group covers the nine branch operations of the shared API (`dblib/db_api.py`)
 plus the connection switch. `BRANCH_COMMIT` to `BRANCH_RESET` each build the
-state they need untimed and record only the verb:
+state they need untimed and record only the operation:
 
 | Operation | Untimed preparation | Timed |
 |-----------|---------------------|-------|
@@ -182,7 +182,7 @@ state they need untimed and record only the verb:
 `branch_op_config` in the task config sets `changes_per_op` (rows per
 prepared side, default 1), `history_commits` and `log_limit` (default 10
 each). Merges and rebases never conflict: the two sides insert different
-keys. A verb the backend lacks is recorded as `UNSUPPORTED`.
+keys. A branch operation the backend lacks is recorded as `UNSUPPORTED`.
 
 ##### Examples
 

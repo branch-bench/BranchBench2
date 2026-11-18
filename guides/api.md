@@ -5,12 +5,12 @@ database system implements. Built-in adapters live in
 `dblib/systems/<system>/adapter.py`. An
 adapter overrides the protected hooks it supports (`_branch_impl`,
 `_commit_impl`, ..., `_storage_bytes`, `_connect_impl`, `_flush_impl`); the
-public verbs wrap them with timing, storage measurement and result recording.
+public branch operations wrap them with timing, storage measurement and result recording.
 The runners reach adapters through the `PreparedTarget` factory.
 
-## Verbs
+## Branch operations
 
-| Verb | Meaning | Returns |
+| Operation | Meaning | Returns |
 |------|---------|---------|
 | `branch(name, from_ref)` | create a branch | |
 | `commit(ref, message)` | snapshot the branch's working state | commit id |
@@ -33,22 +33,22 @@ half-merged working set with a session and a list of
 The callable resolves conflicts with SQL through `db.sql()`; anything it
 leaves is resolved as "ours". Schema conflicts (a dropped table modified on
 the other side, two indexes on the same columns) cannot be resolved in place:
-the backend aborts and the verb is recorded as FAILED with the reason.
+the backend aborts and the branch operation is recorded as FAILED with the reason.
 
-Every verb returns an `OpResult` with `status` OK, UNSUPPORTED (the backend
+Every branch operation returns an `OpResult` with `status` OK, UNSUPPORTED (the backend
 cannot perform the operation; zero latency) or FAILED (the backend tried and
 errored). Nothing raises unless `raise_on_error=True`;
 `result.raise_for_status()` raises on demand.
 
 **An unsupported operation ends the run.** The benchmark drivers treat the
 first UNSUPPORTED result as the end of the workflow: the macrobenchmark
-cancels every worker and records the run as `unsupported: <VERB>: <reason>`
+cancels every worker and records the run as `unsupported: <OPERATION>: <reason>`
 (see [macrobench.md](macrobench.md#running)). A FAILED operation does not
 stop a run; it is recorded and the invariant checks report its effect. Code
 that calls the API directly gets the UNSUPPORTED result back and should stop
 the same way (`if result.unsupported: ...`).
 
-`DBToolSuite.capabilities()` reports which verbs a backend supports, and
+`DBToolSuite.capabilities()` reports which branch operations a backend supports, and
 `DBToolSuite.implementation()` how each one is realised: `native` (the
 system's own primitive), `composed` (several native primitives driven by
 the adapter) or `simulated` (the adapter builds it from SQL). With `DBFORK_NATIVE_ONLY=1` every simulated operation

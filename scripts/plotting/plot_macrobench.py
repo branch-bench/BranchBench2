@@ -5,7 +5,7 @@ Reads the ``<run_id>_e2e_stats.json`` + ``<run_id>.parquet`` pairs that
 produces:
 
   1. ``data/summary.md`` / ``data/summary.csv``: one row per run with elapsed time,
-     setup time, operation counts, per-verb median latency, support,
+     setup time, operation counts, per-operation median latency, support,
      invariants and the scenario's own metrics (time to recovery, merge
      counts, ...).
   2. ``progress.png``: completed agent steps against elapsed time.
@@ -63,16 +63,16 @@ SCENARIO_TITLES = {
     "ops_agent": "S5 Ops agent",
     "data_agent": "S6 Data agent",
 }
-BRANCH_VERBS = ["BRANCH", "COMMIT", "DIFF", "SCHEMA_DIFF", "LOG", "MERGE", "REBASE", "REVERT", "RESET", "DELETE"]
+BRANCH_OPS = ["BRANCH", "COMMIT", "DIFF", "SCHEMA_DIFF", "LOG", "MERGE", "REBASE", "REVERT", "RESET", "DELETE"]
 DATA_OPS = ["READ", "INSERT", "UPDATE", "DELETE_ROWS", "DDL"]
 # EXEC rows summarise the statements they contain, so they are excluded from
 # time sums to avoid double counting.
-# Two groups: branch ops are the verbs plus everything spent reaching a
+# Two groups: branch ops are the branch operations plus everything spent reaching a
 # branch (the connection switch exec() does for a ref, which on Neon is a
 # new connection per branch, and the wait on Neon's branch API); data ops
 # are the statements themselves.
 TIME_GROUPS = {
-    "branch ops": BRANCH_VERBS + ["CONNECT", "API_RETRY_WAIT"],
+    "branch ops": BRANCH_OPS + ["CONNECT", "API_RETRY_WAIT"],
     "data ops": DATA_OPS,
 }
 # Data statements are further split by how many rows they touch
@@ -82,8 +82,8 @@ TIME_GROUPS = {
 # are classified from the SQL shape instead.
 DATA_CLASSES = ["READ:point", "READ:range", "READ:scan", "INSERT:point", "INSERT:bulk",
                 "UPDATE:point", "UPDATE:range", "DELETE_ROWS:point", "DELETE_ROWS:range", "DDL"]
-OP_ORDER = BRANCH_VERBS + ["CONNECT"] + DATA_OPS + ["EXEC"]
-CLASS_ORDER = BRANCH_VERBS + ["CONNECT"] + DATA_CLASSES + ["EXEC"]
+OP_ORDER = BRANCH_OPS + ["CONNECT"] + DATA_OPS + ["EXEC"]
+CLASS_ORDER = BRANCH_OPS + ["CONNECT"] + DATA_CLASSES + ["EXEC"]
 _SCAN_RE = re.compile(r"\bJOIN\b|GROUP BY|\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\(|\bDISTINCT\b", re.I)
 _RANGE_RE = re.compile(r"\bBETWEEN\b|<=|>=|<|>|\bIN\s*\(|\bLIKE\b", re.I)
 _MULTI_INSERT_RE = re.compile(r"\bSELECT\b|\)\s*,\s*\(", re.I)
@@ -398,12 +398,12 @@ def _find(runs, scenario, backend):
     return None
 
 
-STEP_OPS = BRANCH_VERBS + ["EXEC"]
+STEP_OPS = BRANCH_OPS + ["EXEC"]
 
 
 def progress_curve(run: Run) -> tuple:
     """(elapsed seconds, cumulative completed agent steps). A step is one
-    branch verb or one exec() script run by the scenario; the statements
+    branch operation or one exec() script run by the scenario; the statements
     inside an exec, CONNECT rows and the background load are not steps."""
     df = agent_ops(run)
     if df.empty or "end_time" not in df.columns:
@@ -441,7 +441,7 @@ def plot_progress(runs: list[Run], outdir: str) -> None:
         ax.legend(fontsize=8, loc="lower right")
     for idx in range(len(scenarios), nrows * ncols):
         axes[idx // ncols][idx % ncols].axis("off")
-    fig.suptitle("Agent progress: branch verbs and exec() runs completed over time (spine excluded)")
+    fig.suptitle("Agent progress: branch operations and exec() runs completed over time (spine excluded)")
     fig.tight_layout()
     fig.savefig(os.path.join(outdir, "progress.png"), dpi=150)
     plt.close(fig)
@@ -474,7 +474,7 @@ def plot_time_breakdown(runs: list[Run], outdir: str) -> None:
     plt.close(fig)
 
 
-OP_TITLES = {**{o: o for o in BRANCH_VERBS},
+OP_TITLES = {**{o: o for o in BRANCH_OPS},
              **{o: f"{o} (statement inside exec)" for o in DATA_OPS},
              **{o: f"{o} (statement inside exec)" for o in DATA_CLASSES},
              "READ:scan": "READ:scan (aggregate/join inside exec)",
@@ -599,9 +599,9 @@ def _plot_op_panels(runs: list[Run], ops_wanted: list, suptitle: str, filename: 
 
 
 def plot_latency_by_op(runs: list[Run], outdir: str) -> None:
-    """latency_by_op_branch.png (verbs + CONNECT) and latency_by_op_data.png
+    """latency_by_op_branch.png (branch operations + CONNECT) and latency_by_op_data.png
     (statements inside exec() + EXEC)."""
-    _plot_op_panels(runs, BRANCH_VERBS + ["CONNECT"],
+    _plot_op_panels(runs, BRANCH_OPS + ["CONNECT"],
                     "Branch operation latency per scenario: median with 95% CI, colour = backend "
                     "(spine excluded; hollow marker = single sample)",
                     "latency_by_op_branch.png", outdir)
@@ -706,14 +706,14 @@ def plot_latency_cdf(runs: list[Run], outdir: str) -> None:
     for s in scenarios:
         present = [r for r in runs if r.scenario == s and not r.ops.empty]
         agent = {r.run_id: agent_ops(r) for r in present}
-        verbs = [v for v in BRANCH_VERBS + DATA_OPS
+        ops_present = [v for v in BRANCH_OPS + DATA_OPS
                  if any(((a["op_name"] == v) & (a["status"] == "OK")).any() for a in agent.values())]
-        if not verbs:
+        if not ops_present:
             continue
-        ncols = min(3, len(verbs))
-        nrows = int(np.ceil(len(verbs) / ncols))
+        ncols = min(3, len(ops_present))
+        nrows = int(np.ceil(len(ops_present) / ncols))
         fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.2 * nrows), squeeze=False)
-        for vi, v in enumerate(verbs):
+        for vi, v in enumerate(ops_present):
             ax = axes[vi // ncols][vi % ncols]
             for i, b in enumerate(backends):
                 r = _find(present, s, b)
@@ -736,7 +736,7 @@ def plot_latency_cdf(runs: list[Run], outdir: str) -> None:
             ax.set_title(v, fontsize=10)
             ax.grid(alpha=0.3)
             ax.legend(fontsize=7)
-        for vi in range(len(verbs), nrows * ncols):
+        for vi in range(len(ops_present), nrows * ncols):
             axes[vi // ncols][vi % ncols].axis("off")
         fig.suptitle(f"{SCENARIO_TITLES.get(s, s)}: agent operation latency (spine excluded)")
         fig.tight_layout()
@@ -801,10 +801,10 @@ def cross_branch_steps(run: Run, label: str) -> pd.DataFrame:
             groups.append([row])
     else:
         mode = "per_ref"
-        # Start times of the thread's other agent operations (verbs and
+        # Start times of the thread's other agent operations (branch operations and
         # scripts under another label); one of them between two reads
         # separates two logical steps.
-        others = df[df["op_name"].isin(BRANCH_VERBS + ["EXEC"]) & (df["label"] != label)]
+        others = df[df["op_name"].isin(BRANCH_OPS + ["EXEC"]) & (df["label"] != label)]
         other_starts = {t: np.sort(g["start_time"].to_numpy(dtype=float))
                         for t, g in others.groupby("thread_id")}
         cur, thread, prev_end = [], None, None

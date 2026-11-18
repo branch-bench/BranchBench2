@@ -82,7 +82,7 @@ records it.
 
 - **An unsupported operation stops the run.** When a backend cannot perform
   a step of the workflow, the run ends there and is reported as
-  `unsupported: <VERB>: <reason>`. Set `DBFORK_NATIVE_ONLY=1` (or
+  `unsupported: <OPERATION>: <reason>`. Set `DBFORK_NATIVE_ONLY=1` (or
   `--native-only`) to treat every simulated operation as unsupported and see
   how far a system gets on its own primitives.
 - **A failed operation does not stop the run.** It is recorded, and the
@@ -94,7 +94,7 @@ records it.
 
 | Guide | What it covers |
 |---|---|
-| [guides/api.md](guides/api.md) | The Python API: verbs, refs, `exec()`, conflict resolution, result rows |
+| [guides/api.md](guides/api.md) | The Python API: branch operations, refs, `exec()`, conflict resolution, result rows |
 | [guides/macrobench.md](guides/macrobench.md) | The six scenarios, their configuration and intensity knobs, running them, storage measurement |
 | [guides/microbench.md](guides/microbench.md) | The per-operation microbenchmark, the single-operation runner and the latency/throughput scripts |
 | [guides/backends.md](guides/backends.md) | Every backend, what it supports, Docker Compose; each system's own README has its setup |

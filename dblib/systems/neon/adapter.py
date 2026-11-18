@@ -5,7 +5,7 @@ runs in a project of its own (``BackendManager`` creates and deletes it).
 A branch is its own Postgres endpoint, so connecting to one means opening
 a new connection.
 
-Neon versions storage but has no commits, diff or merge. The verbs the
+Neon versions storage but has no commits, diff or merge. The branch operations the
 API lacks are built from what it does have:
 
 * branching at a point in time (``parent_lsn``) and ``restore`` to an LSN;
@@ -13,7 +13,7 @@ API lacks are built from what it does have:
   tables, and plain Postgres on each compute.
 
     branch     POST /branches with parent_id (+ parent_lsn for a commit
-               ref) and a read-write compute; the verb waits for Neon's
+               ref) and a read-write compute; the operation waits for Neon's
                operations to finish, then writes a fork row on the branch
     commit     a row in the branch's _bb_commits table plus the branch's
                pg_current_wal_flush_lsn() as the commit's point in time
@@ -23,7 +23,7 @@ API lacks are built from what it does have:
                postgres_fdw into temp tables and compared locally
     merge      SQL three-way merge on the target's compute: base = a
                temporary branch at the source's fork LSN (created and
-               timed inside the verb), theirs = the source branch over
+               timed inside the operation), theirs = the source branch over
                postgres_fdw; only the key buckets theirs changed are
                pulled into temp tables; conflicts per on_conflict as on
                the other backends
@@ -375,7 +375,7 @@ class NeonToolSuite(PgMergeMixin, DBToolSuite):
         "diff": "per-table row hashes on each compute, differing tables pulled over postgres_fdw "
                 "and compared locally",
         "merge": "SQL three-way merge on the target's compute; base = temporary branch at the "
-                 "fork LSN (created inside the verb), theirs pulled over postgres_fdw",
+                 "fork LSN (created inside the operation), theirs pulled over postgres_fdw",
         "rebase": "three-way merge of the upstream into the branch; the base moves to the "
                   "upstream's LSN",
         "revert": "temporary branches at the commit's LSN and its predecessor; inverse delta "
@@ -651,7 +651,7 @@ class NeonToolSuite(PgMergeMixin, DBToolSuite):
 
     def _reserve(self, branch_id: str, n: int = 1) -> None:
         """Hold (or release, n=-1) a compute without a connection, so the
-        LRU never suspends it mid-verb."""
+        LRU never suspends it mid-operation."""
         cls = type(self)
         with cls._ACT_LOCK:
             cls._HOLDS[branch_id] = max(0, cls._HOLDS.get(branch_id, 0) + n)
@@ -934,7 +934,7 @@ class NeonToolSuite(PgMergeMixin, DBToolSuite):
                 pass
 
     # ------------------------------------------------------------------
-    # Verbs
+    # Branch operations
     # ------------------------------------------------------------------
 
     def _storage_bytes(self) -> int:

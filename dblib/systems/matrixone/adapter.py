@@ -25,7 +25,7 @@ database it was taken on) that holds the committed state. Snapshots stay
 readable after their database is dropped, so a merged-and-deleted branch's
 commits can still be diffed and reverted.
 
-Verb -> MatrixOne primitives (see ``IMPLEMENTATION`` for the summary the
+Branch operation -> MatrixOne primitives (see ``IMPLEMENTATION`` for the summary the
 report uses):
 
     branch     CREATE SNAPSHOT on the parent (the fork point) and

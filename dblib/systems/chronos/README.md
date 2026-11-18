@@ -21,7 +21,7 @@ Setup: the backend uses the same PostgreSQL server as `file_copy`
 commit the backend was written against; it needs `libpq-dev`, `libboost-dev`,
 `libsqlite3-dev`, `python3-dev` and a C++17 compiler). The run's schema and
 seed data are loaded as ordinary PostgreSQL tables with full SQL; the first
-versioning verb *adopts* them: every table is registered with Chronos (its
+versioning branch operation *adopts* them: every table is registered with Chronos (its
 rows copied into the interval table, a table without a primary key gets a
 synthetic `_bb_rowid` key, the original is dropped) — the integration path
 the Chronos documentation describes. From then on every statement goes
@@ -52,7 +52,7 @@ records which is which:
   last sync checkpoint, conflicts compared by key, the changes applied with
   native `upsert_rows`/`delete_keys`, tables and columns added on the
   source replayed as DDL on the target (a differing key or type is a schema
-  conflict and fails the verb). After a merge or rebase the source gets a
+  conflict and fails the branch operation). After a merge or rebase the source gets a
   sync checkpoint that becomes the next base. `rebase()` is the same merge
   with the upstream as the source (the branch's own changes are "theirs").
 - `revert()` (simulated): the inverse of the diff between the commit's

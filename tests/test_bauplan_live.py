@@ -1,5 +1,5 @@
 """Bauplan backend against a live account (skipped unless BAUPLAN_S3_URI is
-set, e.g. in .env, with Bauplan credentials). Exercises every verb through
+set, e.g. in .env, with Bauplan credentials). Exercises every branch operation through
 the public API. Slow: every write is an S3 upload plus Bauplan import jobs
 (tens of seconds), so the data is seeded once and each test works on its own
 branch from the seeded commit."""

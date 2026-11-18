@@ -21,7 +21,7 @@ storage but has no commits, diff or merge, so the adapter builds them from
 point-in-time branching (`parent_lsn`), branch restore and `postgres_fdw`:
 
 - `branch()` (native): `POST /branches` with `parent_id`, `parent_lsn` for a
-  commit ref, and a compute; the verb waits for the operations to finish
+  commit ref, and a compute; the branch operation waits for the operations to finish
   and writes a fork row on the new branch (its own LSN and the parent point
   it was cloned from, the base of later merges).
 - `commit()` (native): a row in the branch's `_bb_commits` table plus
@@ -32,7 +32,7 @@ point-in-time branching (`parent_lsn`), branch restore and `postgres_fdw`:
   pulled over `postgres_fdw` into temp tables and compared locally.
 - `merge()`: SQL three-way merge on the target's compute. The base is a
   temporary branch at the source's fork LSN (its creation is inside the
-  verb's latency), theirs is the source's compute, both pulled over
+  branch operation's latency), theirs is the source's compute, both pulled over
   `postgres_fdw`; rows are matched by primary key, conflicts resolved per
   `on_conflict` with the same callable row shape as the other backends;
   deletes go in reverse foreign-key order and upserts in forward order
@@ -65,7 +65,7 @@ ones no connection holds, and retries (`active_compute_limit_hits`,
 `limit_suspends` and `active_compute_unregistered` in the e2e stats'
 `backend_observations` count how often that happened). All API calls share one process-wide token bucket under the
 documented 700 requests/minute (`NEON_API_RATE_PER_MIN`, `NEON_API_BURST`);
-bucket waits are part of the verb's cost and are summed in the e2e stats'
+bucket waits are part of the branch operation's cost and are summed in the e2e stats'
 `backend_observations`, while reactive waits (429/423/503 backoff, compute
 limit) are recorded as `API_RETRY_WAIT` rows. Connections use the unpooled
 endpoint: the pooler runs PgBouncer in transaction mode, where session

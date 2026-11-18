@@ -2,7 +2,7 @@
 reset and delete only). Merge, rebase and revert come back UNSUPPORTED,
 so these runs check the support contract: a scenario that needs none of
 them completes with every check passed; one that does ends at its first
-unsupported verb with UnsupportedOperationAbort, the verb recorded in the
+unsupported branch operation with UnsupportedOperationAbort, the branch operation recorded in the
 support summary and named in the context, and no failed check."""
 
 import pytest

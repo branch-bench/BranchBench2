@@ -166,7 +166,7 @@ def test_native_only_mode_marks_simulated_verbs_unsupported(suite, monkeypatch):
         r = suite.diff("main", "main")
         assert r.unsupported and "native-only" in r.error
         assert rows(suite, rslt.OpType.DIFF)[0].status == rslt.OpStatus.UNSUPPORTED
-        assert suite.commit("main", "c2").ok          # native verbs still run
+        assert suite.commit("main", "c2").ok          # native operations still run
         # A simulated commit ref falls back to the branch head, flagged.
         res = suite.exec(["SELECT 1"], refs=["main@deadbeef"])[0]
         assert res.ok and rows(suite, rslt.OpType.EXEC)[0].commit_ref_fallback
@@ -182,7 +182,7 @@ def test_schema_diff_compare_and_fake_catalog(suite):
     assert d["columns_added"] == {"t": ["w"]} and d["columns_dropped"] == {}
     assert d["columns_changed"] == {"t": [["v", "text", "varchar(8)"]]} and d["changed"]
     assert not FakeSuite._compare_schemas(a, a)["changed"]
-    assert "schema_diff" not in FakeSuite.implementation()   # one verb: diff covers rows and schema
+    assert "schema_diff" not in FakeSuite.implementation()   # one operation: diff covers rows and schema
     suite.branch("other", "main")
     suite.exec(["CREATE TABLE extra (id INT PRIMARY KEY, v TEXT)", "ALTER TABLE t ADD COLUMN w INT"], refs=["other"])
     r = suite.diff("main", "other")
@@ -273,7 +273,7 @@ def test_in_flight_ops_and_stall_detection(tmp_path):
 
 
 def test_cancelled_op_is_failed_and_noted(tmp_path):
-    """A watchdog cancel makes the running verb fail with the stall note
+    """A watchdog cancel makes the running operation fail with the stall note
     and leaves the suite usable for the next operation."""
     import threading
     from dblib.result_collector import ResultCollector

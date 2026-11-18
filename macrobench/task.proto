@@ -270,7 +270,7 @@ message Workload {
     DataOps data_ops = 2;
     // Multipliers applied on top of the explicit knobs before the run
     // starts (0 or 1 = unchanged). branch_intensity scales how many branch
-    // verbs the scenario issues: the counts of branches, rounds, forks,
+    // operations the scenario issues: the counts of branches, rounds, forks,
     // rebases and investigation points, and it divides commit_interval.
     // data_intensity scales how much SQL runs per branch: statements per
     // step, rows per write, spine clients, and the scenario's per-branch

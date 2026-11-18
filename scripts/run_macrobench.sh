@@ -26,7 +26,7 @@
 # of the scale factor and the intensity multipliers (3600 s at scale 1,
 # intensity 1); a run that reaches the cap is stopped and recorded as
 # interrupted, with its rows and stats written. --max-runtime-sec 0 lifts it.
-# Independently, one operation (a verb or an exec) running for more than
+# Independently, one operation (a branch operation or an exec) running for more than
 # --op-stall-sec (default 600) is cancelled: it is recorded FAILED with a
 # stall note and the run goes on (the e2e stats list the stalls).
 

@@ -3,12 +3,12 @@
 A Scenario is one of the six workflows (S1-S6). It gets a ScenarioContext
 with the parsed config, a DBToolSuite factory, the shared ResultCollector,
 the invariant recorder and the stop event, and drives the backend through
-the git-like verbs and exec(). A FAILED result never stops the workload:
+the git-like branch operations and exec(). A FAILED result never stops the workload:
 scenarios read the OpResult, record what they can and go on, as an agent
 that catches exceptions would. An UNSUPPORTED result ends the run: the
-context installs a hook on the result collector that records the verb,
+context installs a hook on the result collector that records the operation,
 cancels every worker and raises UnsupportedOperationAbort, and the runner
-reports the run as unsupported naming the verb. A scenario therefore never
+reports the run as unsupported naming the operation. A scenario therefore never
 sees an unsupported result, and a check is not applicable only when its
 own precondition did not arise (no commit to revert, a target after the
 fault, and so on).
@@ -33,7 +33,7 @@ class ScenarioStopped(Exception):
 
 
 class UnsupportedOperationAbort(ScenarioStopped):
-    """The backend reported a verb unsupported; the run ends there."""
+    """The backend reported a branch operation unsupported; the run ends there."""
 
 
 class InvariantFailed(Exception):
@@ -126,7 +126,7 @@ def is_retryable_error(msg: str) -> bool:
     """Errors worth retrying after a wait: Neon/Xata rate- and
     resource-limit errors, a connection the server dropped (a compute
     restarted or suspended under it), and Bauplan's branch moving while an
-    operation ran. A verb that failed this way left no partial state (the
+    operation ran. An operation that failed this way left no partial state (the
     composed merges run in one transaction, or on a temporary branch), so
     the retry repeats the whole operation; the failed attempt stays recorded."""
     msg = (msg or "").lower()
@@ -151,7 +151,7 @@ class ScenarioContext:
     progress: object = None         # SharedProgress or None
     stop_event: threading.Event = field(default_factory=threading.Event)
     stop_reason: str = ""
-    unsupported_abort: str = ""     # "VERB: reason" of the unsupported verb that ended the run
+    unsupported_abort: str = ""     # "OPERATION: reason" of the unsupported operation that ended the run
     log: Callable[[str], None] = print
     metrics: dict = field(default_factory=dict)
     worker_conns: dict = field(default_factory=dict)
@@ -172,8 +172,8 @@ class ScenarioContext:
         self.collector.on_unsupported = self._abort_on_unsupported
 
     def _abort_on_unsupported(self, op: str, reason: str) -> None:
-        """Collector hook: the first unsupported verb ends the run. Runs on
-        the thread that issued the verb, after its row was recorded."""
+        """Collector hook: the first unsupported operation ends the run. Runs
+        on the thread that issued it, after its row was recorded."""
         what = f"{op}: {reason}" if reason else op
         with self._lock:
             first = not self.unsupported_abort
@@ -330,8 +330,8 @@ class ScenarioContext:
         return self._pool_done(results)
 
     def _pool_done(self, results: list) -> list:
-        """Every worker suite is closed. An unsupported verb or a failed
-        check seen by a worker ends the run on the caller's thread too, so
+        """Every worker suite is closed. An unsupported branch operation or a
+        failed check seen by a worker ends the run on the caller's thread too, so
         the scenario does not go on without it."""
         if self.unsupported_abort:
             raise UnsupportedOperationAbort(self.unsupported_abort)

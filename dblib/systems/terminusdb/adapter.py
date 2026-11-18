@@ -29,7 +29,7 @@ KEY, COPY ... FROM stdin, INSERT) and writes them as a schema and
 documents. The column list, SQL types and primary key of each table are
 kept in the class's ``@metadata`` so that any process can rebuild them.
 
-Verbs
+Branch operations
 -----
 branch, delete, log, diff, reset and rebase are single native calls.
 

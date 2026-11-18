@@ -15,7 +15,7 @@ Figures (all by default):
 * ``bars``   cost_bars.png (S1, S3, S4, S6) and cost_bars_all.png (S1 to S6):
              per scenario, worker-seconds in branch operations, in data
              operations and the elapsed, as bars with the operation counts.
-             A run that ended at an unsupported verb, failed an invariant
+             A run that ended at an unsupported operation, failed an invariant
              check or did not complete gets no bar: an X and the reason
              stand in its row, since its cost is not that of the workflow.
 * ``panels`` cost_panels.png: the same three quantities as one marker per
@@ -64,7 +64,7 @@ RED = "#b00020"
 
 def load(run_dir):
     """One row per run: scenario, backend, elapsed, fails, status,
-    unsupported (the first unsupported verb, or ""), invalid (why the run's
+    unsupported (the first unsupported operation, or ""), invalid (why the run's
     cost is not comparable, or ""), the summed latency per category
     (columns named as in CATS), branch_s / data_s and branch_n / data_n
     (branch categories against the rest), and threads (98th percentile of
@@ -77,7 +77,7 @@ def load(run_dir):
         fails = sum(1 for c in d["invariants"]["results"] if c["passed"] is False)
         df = pd.read_parquet(f.replace("_e2e_stats.json", ".parquet"),
                              columns=["op_name", "status", "label", "latency", "thread_id", "start_time"])
-        # The unsupported verbs with the scenario step that issued them,
+        # The unsupported operations with the scenario step that issued them,
         # e.g. "BRANCH (investigation_branch)", in order of first appearance.
         uns = df[df.status == "UNSUPPORTED"][["op_name", "label"]].drop_duplicates()
         uns_verbs = [f"{o} ({l})" if l else o for o, l in zip(uns.op_name, uns.label)]
@@ -90,7 +90,7 @@ def load(run_dir):
         peak = int(df.assign(sec=sec).groupby("sec").thread_id.nunique().quantile(0.98))
         create.setdefault(be, []).extend(df.latency[(df.op_name == "BRANCH") & (df.status == "OK")].tolist())
         # Why the run's cost is not the workflow's: it ended at (or, in
-        # older runs, skipped) an unsupported verb, failed a check, or did
+        # older runs, skipped) an unsupported operation, failed a check, or did
         # not complete (interrupted, crashed, incomplete).
         status = str(d.get("status", "completed"))
         ops = d.get("unsupported_ops") or []
@@ -291,7 +291,7 @@ def fig_bars(t, create_ms, scenarios, out, log=False):
         _row_labels(ax_row[0], systems, create_ms)
     fig.text(0.01, 0.005, "Systems ordered by branch-creation latency (pooled median beside the name). Worker-seconds = sum of every agent-side operation's "
              "latency across the scenario's concurrent workers, so a column can exceed the wall-clock elapsed; the spine's background load is excluded. "
-             "✗ = no comparable cost: the run ended at an unsupported verb, failed invariant checks or did not complete. One run per cell.", fontsize=7.5, color="#555")
+             "✗ = no comparable cost: the run ended at an unsupported operation, failed invariant checks or did not complete. One run per cell.", fontsize=7.5, color="#555")
     fig.savefig(out, dpi=150, bbox_inches="tight"); plt.close(fig)
     print("wrote", out)
 
@@ -467,7 +467,7 @@ def fig_panels(t, create_ms, scenarios, out):
     handles = [plt.Line2D([], [], marker=MARKERS[sc][0], color=MARKERS[sc][1], ls="none", ms=7) for sc in scenarios]
     labels = [TITLES[sc].split(" (")[0] for sc in scenarios]
     handles.append(plt.Line2D([], [], marker="x", color=RED, markeredgewidth=1.8, ls="none", ms=7))
-    labels.append("no comparable cost (unsupported verb, failed check or incomplete run)")
+    labels.append("no comparable cost (unsupported operation, failed check or incomplete run)")
     fig.legend(handles, labels, ncol=len(labels), fontsize=8, frameon=False, loc="lower center", bbox_to_anchor=(0.5, -0.02))
     fig.text(0.01, -0.08, "Rows ordered by branch-creation latency (pooled median). Summed times add every agent-side operation's latency "
              "over all workers (workers run concurrently, so they exceed wall time); spine load excluded. One run per cell.",

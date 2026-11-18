@@ -1,5 +1,5 @@
 """SeekDB backend against a live server (skipped when none listens on
-SEEKDB_HOST:SEEKDB_PORT). Exercises every verb through the public API."""
+SEEKDB_HOST:SEEKDB_PORT). Exercises every branch operation through the public API."""
 
 import socket
 

@@ -22,7 +22,7 @@ from util.sql_parse import get_sql_operation_keyword
 # Thread-local storage for thread_id
 _thread_local = threading.local()
 
-# Verbs whose rows count as "operations" for throughput (as opposed to the
+# Branch operations whose rows count as "operations" for throughput (as opposed to the
 # per-statement rows inside an exec, which are a breakdown of one EXEC row).
 VERB_OP_TYPES = frozenset(
     {
@@ -217,7 +217,7 @@ class ResultCollector:
         # Driver-level failures (an operation raised in the runner)
         self.failed_operations = []
 
-        # Verbs some backend reported as unsupported during this run, as
+        # Branch operations some backend reported as unsupported during this run, as
         # "OPTYPE" or "OPTYPE:reason". Any entry marks the workflow as not
         # fully supported on this backend.
         self.unsupported_ops: set[str] = set()
@@ -412,7 +412,7 @@ class ResultCollector:
     def emit(self, op_type: rslt.OpType, status: rslt.OpStatus = rslt.OpStatus.OK, *args, **kw) -> None:
         """Append one Result row (see _emit). An UNSUPPORTED row then
         reaches ``on_unsupported`` when a hook is set; the hook may raise,
-        which ends the caller's verb with the row already recorded."""
+        which ends the caller's operation with the row already recorded."""
         self._emit(op_type, status, *args, **kw)
         if status == rslt.OpStatus.UNSUPPORTED and self.on_unsupported is not None:
             self.on_unsupported(rslt.OpType.Name(op_type), kw.get("error_message") or "")

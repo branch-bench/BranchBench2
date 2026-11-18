@@ -7,9 +7,9 @@ number of checks; failing cells show what failed and the run's dominant
 error, so the figure carries a short explanation of every failure.
 
 Panel (b) uses the native-only runs in --native-dir. Without them it
-still has two kinds of cells: a backend whose every verb is native runs
+still has two kinds of cells: a backend whose every branch operation is native runs
 the same code in both modes, so its default run stands in; for the
-others, the verbs the scenario used that the engine does not provide are
+others, the branch operations the scenario used that the engine does not provide are
 listed as the expected first unsupported operations (hatched, "expected")
 until the native-only sweep replaces them.
 
@@ -32,9 +32,9 @@ import pandas as pd  # noqa: E402
 
 from plot_macro_cost import NAMES, SCENARIOS, _systems, load  # noqa: E402
 
-VERBS = ["BRANCH", "COMMIT", "DIFF", "SCHEMA_DIFF", "LOG", "MERGE", "REBASE", "RESET", "REVERT", "DELETE"]
+BRANCH_OPS = ["BRANCH", "COMMIT", "DIFF", "SCHEMA_DIFF", "LOG", "MERGE", "REBASE", "RESET", "REVERT", "DELETE"]
 # In native-only mode these adapters switch to the engine's own primitive
-# instead of reporting the verb unsupported (dblib/systems/seekdb/adapter.py,
+# instead of reporting the operation unsupported (dblib/systems/seekdb/adapter.py,
 # dblib/systems/matrixone/adapter.py).
 NATIVE_SWITCH = {("SEEKDB", "merge"), ("MATRIXONE", "reset")}
 PASS, FAIL, NONE = "#d4ecd9", "#f6cdc8", "#f2f2f2"
@@ -78,8 +78,8 @@ def _measured(d):
         return f"✓ {passed}" + (f" (+{na} n/a)" if na else ""), PASS
     lines = []
     if uns:
-        verbs = sorted({str(u).split(":")[0].lower() for u in uns})
-        lines.append("unsupported: " + ", ".join(verbs[:2]))
+        ops = sorted({str(u).split(":")[0].lower() for u in uns})
+        lines.append("unsupported: " + ", ".join(ops[:2]))
         reason = " ".join(str(u) for u in uns)
         lines += [short for key, short in UNSUPPORTED_KEYS if key in reason][:1]
     if failed:
@@ -92,11 +92,18 @@ def _measured(d):
     return "\n".join(lines), FAIL
 
 
+def _implementation(d):
+    """{operation: native|simulated|unsupported} from a run's e2e stats
+    (key "verbs"; "branch_ops" is accepted too)."""
+    impl = d.get("implementation") or {}
+    return impl.get("branch_ops") or impl.get("verbs") or {}
+
+
 def _expected(d):
-    """Verbs the scenario used that the engine does not provide natively."""
-    impl = (d.get("implementation") or {}).get("verbs") or {}
+    """Branch operations the scenario used that the engine does not provide natively."""
+    impl = _implementation(d)
     counts = d.get("op_status_counts") or {}
-    used = [v.lower() for v in VERBS if sum(counts.get(v, {}).values()) > 0]
+    used = [v.lower() for v in BRANCH_OPS if sum(counts.get(v, {}).values()) > 0]
     missing = [v for v in used if not str(impl.get(v, "native")).startswith("native")
                and (d["backend"], v) not in NATIVE_SWITCH]
     return missing
@@ -143,15 +150,15 @@ def main():
             txt, col = _measured(nat[(be, sc)])
             right[(b, sc)] = (txt, col, False)
         elif not _expected(d) and all(str(v).startswith("native")
-                                      for v in ((d.get("implementation") or {}).get("verbs") or {}).values()):
+                                      for v in _implementation(d).values()):
             right[(b, sc)] = (txt + "\n(same run)", col, False)
         else:
             missing = _expected(d)
             if "branch" in missing:
                 right[(b, sc)] = ("expected\nunsupported:\nno native branch", FAIL, True)
             elif missing:
-                verbs = [", ".join(missing[k:k + 2]) for k in range(0, min(len(missing), 4), 2)]
-                right[(b, sc)] = ("expected\nunsupported:\n" + "\n".join(verbs), FAIL, True)
+                ops = [", ".join(missing[k:k + 2]) for k in range(0, min(len(missing), 4), 2)]
+                right[(b, sc)] = ("expected\nunsupported:\n" + "\n".join(ops), FAIL, True)
             else:
                 right[(b, sc)] = ("expected to run\n(not yet run)", NONE, True)
 
@@ -164,7 +171,7 @@ def main():
     handles = [plt.Rectangle((0, 0), 1, 1, color=PASS), plt.Rectangle((0, 0), 1, 1, color=FAIL),
                plt.Rectangle((0, 0), 1, 1, fc=FAIL, hatch="////", ec="white")]
     fig.legend(handles, ["finished, every check passed (count)", "failed: a check failed or an operation was unsupported",
-                         "expected from the verb coverage; native-only run pending"],
+                         "expected from the operation coverage; native-only run pending"],
                ncol=3, fontsize=7.5, frameon=False, loc="lower center", bbox_to_anchor=(0.5, -0.03))
     out = os.path.join(a.outdir, "rq1_outcomes.png")
     fig.savefig(out, dpi=200, bbox_inches="tight")
