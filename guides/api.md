@@ -100,31 +100,57 @@ is reported as unsupported. The macrobench e2e stats carry both under
 ## exec()
 
 ```python
-results = db.exec(script, refs=["feature"], mode="per_ref", label="eval")
+results = suite.exec(script, refs=["feature"], mode="per_ref", label="eval", max_rows=100)
 ```
 
-runs `script` on each ref in turn (`mode="per_ref"`), or once with every ref
-addressable from one session (`mode="multi"`, on adapters that declare
-`SUPPORTS_MULTI_REF_EXEC`; others record it as UNSUPPORTED). A script is a list of SQL statements
-(strings or `(sql, params)`), Python source, or a callable. Python source
-runs with `db` (the session), `params` and `suite` in scope and may define
-`run(db)`, whose return value becomes the result's `value`:
+`exec()` runs `script` on each ref in turn (`mode="per_ref"`), or once with
+every ref addressable from one session (`mode="multi"`, on adapters that
+declare `SUPPORTS_MULTI_REF_EXEC`: Dolt, SeekDB, MatrixOne, file_copy over
+postgres_fdw and Chronos over views on its interval tables; others record
+it as UNSUPPORTED).
 
-```python
-script = """
-def run(db):
-    db.sql("UPDATE stock SET s_quantity = s_quantity - %s WHERE s_i_id = %s", (params["qty"], params["item"]))
-    return db.sql("SELECT count(*) FROM stock WHERE s_quantity = 0")[0][0]
-"""
-```
+A script is one of:
 
-Every statement issued through `db.sql()` autocommits and is recorded as its
-own row (READ/INSERT/UPDATE/DELETE_ROWS/DDL) whose `num_keys_touched` is the rows affected (writes) or returned (reads), unless the script set it with `db.record_keys_touched(n)`. Per ref, `exec()` also records a CONNECT
-row when it had to switch the connection to that branch, and one EXEC row
-with the script's total latency and storage delta. `exec_async()` runs the
-same thing on a connection pool (`open_async_pool(size)`) for throughput
-measurement; its scripts must be a SQL list, a coroutine function, or source
-defining `async def run(db)`.
+- **A list of SQL statements:** each a string, or `(sql, params)` with `%s`
+  placeholders. This is what an agent or another benchmark's harness should
+  pass.
+- **A callable taking the session:** for driver code that needs logic
+  between statements. It calls `db.sql(query, params)`, which returns the
+  rows, and its return value becomes the result's `value`. Values reach it
+  by closure:
+
+  ```python
+  def restock(db):
+      db.sql("UPDATE stock SET s_quantity = s_quantity + %s WHERE s_i_id = %s", (qty, item))
+      return db.sql("SELECT count(*) FROM stock WHERE s_quantity = 0")[0][0]
+  suite.exec(restock, refs=["feature"])
+  ```
+
+Text is never run as Python: passing a string raises `TypeError` before
+anything runs.
+
+**Results.** `exec()` returns one `ExecResult` per ref.
+- **`.statements`:** one `StatementResult` per statement, with:
+  - `.columns`: column names, or `None` for statements without a result set;
+  - `.rows`;
+  - `.rowcount`: rows returned, or rows a write affected;
+  - `.truncated`: true when `max_rows` cut the rows kept;
+  - `.sql`, `.status` and `.error`.
+- **`.rows` / `.columns`:** shortcuts for the last statement that returned
+  rows.
+- **`max_rows`** only bounds what the result keeps. A callable's `db.sql()`
+  always gets every row.
+
+**Recording.** Every statement autocommits and is recorded as its own row
+(READ/INSERT/UPDATE/DELETE_ROWS/DDL). Its `num_keys_touched` is the rows
+affected (writes) or returned (reads), unless the script set it with
+`db.record_keys_touched(n)`. Per ref, `exec()` also records:
+- a CONNECT row when it had to switch the connection to that branch;
+- one EXEC row with the script's total latency and storage delta.
+
+`exec_async()` does the same on a connection pool (`open_async_pool(size)`)
+for throughput measurement. Its scripts are a SQL list or a coroutine
+function.
 
 ## Result rows
 

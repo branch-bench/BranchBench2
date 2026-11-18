@@ -100,28 +100,46 @@ def test_exec_rows_and_statement_breakdown(suite):
     assert ops == [rslt.OpType.READ, rslt.OpType.INSERT, rslt.OpType.DDL,
                    rslt.OpType.EXEC]
     out = rows(suite)
-    assert out[0].num_keys_touched == 3 and out[1].num_keys_touched == 0
+    # explicit count on the read; the insert records the row it wrote
+    assert out[0].num_keys_touched == 3 and out[1].num_keys_touched == 1
     assert all(r.exec_id == out[0].exec_id for r in out)
     assert all(r.label == "phase1" for r in out)
     assert "CREATE INDEX" in out[-1].sql_query
     assert out[-1].latency >= sum(r.latency for r in out[:-1]) * 0.5
 
 
-def test_exec_python_script_and_params(suite):
-    script = """
-n = params["n"]
-def run(db):
-    db.sql("INSERT INTO t VALUES (?, ?)", (n, "p"))
-    return db.sql("SELECT count(*) FROM t")[0][0]
-"""
-    res = suite.exec(script, refs=["main"], params={"n": 9})[0]
+def test_exec_callable_and_no_python_source(suite):
+    n = 9
+
+    def script(db):                       # driver code: a callable, values by closure
+        db.sql("INSERT INTO t VALUES (?, ?)", (n, "p"))
+        return db.sql("SELECT count(*) FROM t")[0][0]
+    res = suite.exec(script, refs=["main"])[0]
     assert res.ok and res.value == 2
-    # top-level only script
-    res = suite.exec("db.sql('SELECT 1')", refs=["main"])[0]
-    assert res.ok and res.rows == [(1,)]
-    # callable
     res = suite.exec(lambda db: db.sql("SELECT 2")[0][0], refs=["main"])[0]
     assert res.value == 2
+    # Text is never run as Python: a string script is refused before anything runs.
+    before = len(rows(suite))
+    with pytest.raises(TypeError, match="Python source text is not run"):
+        suite.exec("db.sql('DELETE FROM t')", refs=["main"])
+    assert len(rows(suite)) == before
+    assert suite.exec(["SELECT count(*) FROM t"], refs=["main"])[0].rows == [(2,)]
+
+
+def test_statement_results_carry_columns_rowcount_and_truncation(suite):
+    suite.exec([("INSERT INTO t VALUES (?, ?)", (2, "b")), ("INSERT INTO t VALUES (?, ?)", (3, "c"))],
+               refs=["main"])
+    res = suite.exec(["SELECT id, v FROM t ORDER BY id", "UPDATE t SET v = 'z' WHERE id >= 2",
+                      "SELECT v FROM t WHERE id = 99"], refs=["main"], max_rows=2)[0]
+    sel, upd, empty = res.statements
+    assert sel.columns == ["id", "v"] and sel.rows == [(1, "a"), (2, "b")]
+    assert sel.rowcount == 3 and sel.truncated                  # 3 rows, 2 kept
+    assert upd.columns is None and upd.rows is None and upd.rowcount == 2 and not upd.truncated
+    assert empty.columns == ["v"] and empty.rows == [] and empty.rowcount == 0
+    assert res.columns == ["v"] and res.rows == []
+    # without max_rows every row is kept
+    full = suite.exec(["SELECT id FROM t"], refs=["main"])[0].statements[0]
+    assert full.rowcount == 3 and len(full.rows) == 3 and not full.truncated
 
 
 def test_exec_failure_in_script(suite):
@@ -213,16 +231,17 @@ def test_exec_async(suite):
     async def go():
         await suite.open_async_pool(2)
         r1 = await suite.exec_async(["SELECT count(*) FROM t"], refs=["main"])
-        script = "async def run(db):\n    return (await db.sql('SELECT 1'))[0][0]"
+        async def script(db):
+            return (await db.sql("SELECT 1"))[0][0]
         r2 = await suite.exec_async(script, refs=["b1"])
-        r3 = await suite.exec_async("db.sql('SELECT 1')", refs=["main"])
+        with pytest.raises(TypeError):
+            await suite.exec_async("db.sql('SELECT 1')", refs=["main"])
         await suite.close_async_pool()
-        return r1, r2, r3
+        return r1, r2
 
-    r1, r2, r3 = asyncio.run(go())
-    assert r1[0].ok and r1[0].rows == [(1,)]
+    r1, r2 = asyncio.run(go())
+    assert r1[0].ok and r1[0].rows == [(1,)] and r1[0].columns is not None
     assert r2[0].ok and r2[0].value == 1
-    assert r3[0].failed and "async def run" in r3[0].error
     ops = [(r.op_type, r.status) for r in rows(suite)]
     assert ops[0] == (rslt.OpType.CONNECT, rslt.OpStatus.OK)
     assert ops[1] == (rslt.OpType.READ, rslt.OpStatus.OK)

@@ -79,9 +79,12 @@ def test_adoption_and_sql_shim(suite):
     assert rows(suite, MAIN, "SELECT note, extra FROM audit") == [("none", "e")]
     assert rows(suite, MAIN, "SELECT COUNT(*) FROM audit_v") == [(1,)]
     # transactions: rollback undoes, commit keeps
-    r = suite.exec("def run(db):\n    db.sql('BEGIN'); db.sql(\"UPDATE t SET v = 'tx' WHERE id = 1\")\n"
-                   "    assert db.sql('SELECT v FROM t WHERE id = 1')[0][0] == 'tx'\n    db.sql('ROLLBACK')",
-                   refs=[MAIN])[0]
+    def rollback_script(db):
+        db.sql("BEGIN")
+        db.sql("UPDATE t SET v = 'tx' WHERE id = 1")
+        assert db.sql("SELECT v FROM t WHERE id = 1")[0][0] == "tx"
+        db.sql("ROLLBACK")
+    r = suite.exec(rollback_script, refs=[MAIN])[0]
     assert r.ok, r.error
     assert rows(suite, MAIN, "SELECT v FROM t WHERE id = 1") == [("a2",)]
     log = ok(suite.log(MAIN)).value

@@ -33,15 +33,21 @@ exec()
 (``mode="multi"``, only on backends with multi-branch query semantics). A
 script is one of:
 
-* a list of SQL statements, each a string or ``(sql, params)``;
-* Python source. It runs with ``db`` (the Session), ``params`` and ``suite``
-  in scope. If it defines ``run(db)`` that function is called with the
-  session (``async def run(db)`` in exec_async) and its return value becomes
-  the EXEC row's value;
-* a callable taking the session.
+* a list of SQL statements, each a string or ``(sql, params)``: what an
+  agent or a harness should pass;
+* a callable taking the session (a coroutine function in exec_async), for
+  driver code that needs logic between statements; its return value
+  becomes the result's ``value``.
 
-Each statement the script issues through ``db.sql()`` is timed and recorded
-as its own row (READ/INSERT/UPDATE/DELETE_ROWS/DDL). Per ref, exec() also records a
+Python source text is not accepted: a script can never run code it was
+handed as text.
+
+Each statement is timed and recorded as its own row
+(READ/INSERT/UPDATE/DELETE_ROWS/DDL), and the ExecResult carries one
+StatementResult per statement: its ``columns``, ``rows`` and ``rowcount``
+(rows returned, or rows affected by a write), and ``truncated`` when
+``exec(..., max_rows=n)`` cut the rows kept in the result (scripts calling
+``db.sql()`` always get every row). Per ref, exec() also records a
 CONNECT row when it had to switch the connection, and one EXEC row with the
 script's total latency and the storage delta. Every statement autocommits.
 
@@ -211,6 +217,20 @@ class OpResult:
 
 
 @dataclass
+class StatementResult(OpResult):
+    """Outcome of one statement inside exec(): ``value`` holds its rows."""
+
+    sql: str = ""
+    columns: Optional[list] = None      # column names; None for statements without a result set
+    rowcount: Optional[int] = None      # rows returned (all of them), rows a write affected, or None if unknown
+    truncated: bool = False             # rows beyond exec(max_rows=...) were not kept
+
+    @property
+    def rows(self):
+        return self.value
+
+
+@dataclass
 class ExecResult(OpResult):
     """Outcome of exec() on one ref (or one multi-ref session)."""
 
@@ -224,6 +244,14 @@ class ExecResult(OpResult):
         for s in reversed(self.statements):
             if s.ok:
                 return s.value
+        return None
+
+    @property
+    def columns(self):
+        """Column names of the last statement that returned rows, if any."""
+        for s in reversed(self.statements):
+            if s.ok and s.columns is not None:
+                return s.columns
         return None
 
 
@@ -244,6 +272,9 @@ class _SessionBase:
         self.label = label
         self.statements: list = []
         self._keys_touched = keys_touched
+        # Rows kept per statement in the result (None = all); db.sql() still
+        # returns every row to the script.
+        self.max_rows: Optional[int] = None
 
     def table(self, ref: RefLike, table: str) -> str:
         """Backend-qualified name of ``table`` on ``ref`` for a multi-ref
@@ -261,10 +292,20 @@ class _SessionBase:
         return n if n else max(int(rows_touched or 0), 0)
 
     def _record(self, query, vars, status, latency, start, end, value, error,
-                rows_touched: int = 0):
-        result = OpResult(
+                rows_touched: int = 0, columns: Optional[list] = None,
+                rowcount: Optional[int] = None):
+        truncated = False
+        if value is not None:
+            # One shape for every driver: a list of rows (pymysql returns a tuple).
+            value = list(value)
+            if self.max_rows is not None and len(value) > self.max_rows:
+                value, truncated = value[:self.max_rows], True
+        result = StatementResult(
             op="sql", status=status, ref=str(self.ref), latency=latency,
-            value=value, error=error,
+            value=value, error=error, sql=query, columns=columns,
+            # DB-API drivers report -1 when the count is unknown.
+            rowcount=rowcount if rowcount is None or rowcount >= 0 else None,
+            truncated=truncated,
         )
         self.statements.append(result)
         if self.timed:
@@ -315,13 +356,14 @@ class Session(_SessionBase):
         if timed is not None:
             saved, self.timed = self.timed, timed
         self.suite._check_cancel()   # a stall watchdog cancelled this exec
-        rows, error, status, touched = None, "", OpStatus.OK, 0
+        rows, error, status, touched, columns = None, "", OpStatus.OK, 0, None
         start_wall = time.time()
         start = time.perf_counter()
         try:
             with self.conn.cursor() as cur:
                 cur.execute(query, vars)
                 if cur.description is not None:
+                    columns = [d[0] for d in cur.description]
                     rows = cur.fetchall()
                     touched = len(rows)
                 else:
@@ -332,7 +374,8 @@ class Session(_SessionBase):
         finally:
             latency = time.perf_counter() - start
             self._record(query, vars, status, latency, start_wall, time.time(),
-                         rows, error, touched)
+                         rows, error, touched, columns=columns,
+                         rowcount=touched if status == OpStatus.OK else None)
             if timed is not None:
                 self.timed = saved
         return rows
@@ -362,13 +405,14 @@ class AsyncSession(_SessionBase):
     async def sql(self, query: str, vars=None, timed: bool = None):
         if timed is not None:
             saved, self.timed = self.timed, timed
-        rows, error, status, touched = None, "", OpStatus.OK, 0
+        rows, error, status, touched, columns = None, "", OpStatus.OK, 0, None
         start_wall = time.time()
         start = time.perf_counter()
         try:
             async with self.conn.cursor() as cur:
                 await cur.execute(query, vars)
                 if cur.description is not None:
+                    columns = [d[0] for d in cur.description]
                     rows = await cur.fetchall()
                     touched = len(rows)
                 else:
@@ -379,10 +423,23 @@ class AsyncSession(_SessionBase):
         finally:
             latency = time.perf_counter() - start
             self._record(query, vars, status, latency, start_wall, time.time(),
-                         rows, error, touched)
+                         rows, error, touched, columns=columns,
+                         rowcount=touched if status == OpStatus.OK else None)
             if timed is not None:
                 self.timed = saved
         return rows
+
+
+_SCRIPT_TYPE_ERROR = ("exec() takes a list of SQL statements (strings or (sql, params)) or a "
+                      "callable taking the session; got {}. Python source text is not run.")
+
+
+def _check_script(script) -> None:
+    """Reject anything exec() does not run, before any connection work:
+    in particular a string, which would otherwise be Python source."""
+    if isinstance(script, (list, tuple)) or callable(script):
+        return
+    raise TypeError(_SCRIPT_TYPE_ERROR.format(type(script).__name__))
 
 
 def _script_text(script) -> str:
@@ -984,7 +1041,7 @@ class DBToolSuite(ABC):
         return result
 
     @staticmethod
-    def _run_script(script, session: Session, params, suite):
+    def _run_script(script, session: Session):
         if callable(script):
             return script(session)
         if isinstance(script, (list, tuple)):
@@ -994,25 +1051,19 @@ class DBToolSuite(ABC):
                 else:
                     session.sql(item)
             return None
-        if isinstance(script, str):
-            code = compile(script, "<exec-script>", "exec")
-            scope = {"db": session, "params": params or {}, "suite": suite,
-                     "__name__": "__dbscript__"}
-            exec(code, scope)
-            run = scope.get("run")
-            if callable(run):
-                return run(session)
-            return None
-        raise TypeError(f"Unsupported script type: {type(script).__name__}")
+        raise TypeError(_SCRIPT_TYPE_ERROR.format(type(script).__name__))
 
-    def exec(self, script, refs=None, *, mode: str = "per_ref", params=None,
-             timed: bool = True, storage: bool = None, label: str = "",
-             raise_on_error: bool = False) -> list:
-        """Run ``script`` on ``refs``; see the module docstring.
+    def exec(self, script, refs=None, *, mode: str = "per_ref",
+             max_rows: Optional[int] = None, timed: bool = True, storage: bool = None,
+             label: str = "", raise_on_error: bool = False) -> list:
+        """Run ``script`` (a list of SQL, or a callable taking the session)
+        on ``refs``; see the module docstring. ``max_rows`` bounds the rows
+        each StatementResult keeps (``truncated`` marks a cut).
 
         Returns one ExecResult per ref in per_ref mode, or a single-element
         list in multi mode.
         """
+        _check_script(script)
         resolved, storage, exec_id, keys = self._prepare_exec(refs, mode, storage)
         text = _script_text(script)
         if mode == "multi":
@@ -1023,10 +1074,10 @@ class DBToolSuite(ABC):
                                                text, raise_on_error)]
             return [self._exec_one(script, text, resolved[0][0], all_refs,
                                    fallback, exec_id, timed, storage, label,
-                                   params, keys, raise_on_error)]
+                                   max_rows, keys, raise_on_error)]
         return [
             self._exec_one(script, text, r, [r], f, exec_id, timed, storage,
-                           label, params, keys, raise_on_error)
+                           label, max_rows, keys, raise_on_error)
             for r, f in resolved
         ]
 
@@ -1047,7 +1098,7 @@ class DBToolSuite(ABC):
         return result
 
     def _exec_one(self, script, text, ref, all_refs, fallback, exec_id, timed,
-                  storage, label, params, keys, raise_on_error) -> ExecResult:
+                  storage, label, max_rows, keys, raise_on_error) -> ExecResult:
         before = self._safe_storage() if storage else 0
         connect = self._connect(ref, exec_id, timed, label, fallback)
         result = ExecResult(op="exec", ref=str(ref),
@@ -1069,8 +1120,9 @@ class DBToolSuite(ABC):
             while True:
                 session = Session(self, self.conn, ref, all_refs, exec_id, timed,
                                   label, keys)
+                session.max_rows = max_rows
                 try:
-                    result.value = self._run_script(script, session, params, self)
+                    result.value = self._run_script(script, session)
                     self._exec_finish(session)
                 except Exception as e:
                     self._exec_abort(session)
@@ -1137,7 +1189,7 @@ class DBToolSuite(ABC):
             yield conn, time.perf_counter() - start
 
     @staticmethod
-    async def _run_script_async(script, session: AsyncSession, params, suite):
+    async def _run_script_async(script, session: AsyncSession):
         if isinstance(script, (list, tuple)):
             for item in script:
                 if isinstance(item, (list, tuple)):
@@ -1145,29 +1197,21 @@ class DBToolSuite(ABC):
                 else:
                     await session.sql(item)
             return None
-        if isinstance(script, str):
-            code = compile(script, "<exec-script>", "exec")
-            scope = {"db": session, "params": params or {}, "suite": suite,
-                     "__name__": "__dbscript__"}
-            exec(code, scope)
-            script = scope.get("run")
-            if script is None:
-                raise TypeError("exec_async needs the script to define "
-                                "'async def run(db)'")
         if callable(script):
             value = script(session)
             if inspect.isawaitable(value):
                 value = await value
             return value
-        raise TypeError(f"Unsupported script type: {type(script).__name__}")
+        raise TypeError(_SCRIPT_TYPE_ERROR.format(type(script).__name__))
 
     async def exec_async(self, script, refs=None, *, mode: str = "per_ref",
-                         params=None, timed: bool = True, storage: bool = None,
-                         label: str = "", raise_on_error: bool = False) -> list:
+                         max_rows: Optional[int] = None, timed: bool = True,
+                         storage: bool = None, label: str = "",
+                         raise_on_error: bool = False) -> list:
         """Async exec() on a pool connection; the script must be a list of
-        SQL, a coroutine function, or Python source defining
-        ``async def run(db)``. Pool wait is recorded on the EXEC row, not
-        in its latency."""
+        SQL or a coroutine function taking the session. Pool wait is
+        recorded on the EXEC row, not in its latency."""
+        _check_script(script)
         resolved, storage, exec_id, keys = self._prepare_exec(refs, mode, storage)
         text = _script_text(script)
         if mode == "multi":
@@ -1178,16 +1222,16 @@ class DBToolSuite(ABC):
                                                text, raise_on_error)]
             return [await self._exec_one_async(
                 script, text, resolved[0][0], all_refs, fallback, exec_id,
-                timed, storage, label, params, keys, raise_on_error)]
+                timed, storage, label, max_rows, keys, raise_on_error)]
         results = []
         for r, f in resolved:
             results.append(await self._exec_one_async(
                 script, text, r, [r], f, exec_id, timed, storage, label,
-                params, keys, raise_on_error))
+                max_rows, keys, raise_on_error))
         return results
 
     async def _exec_one_async(self, script, text, ref, all_refs, fallback,
-                              exec_id, timed, storage, label, params, keys,
+                              exec_id, timed, storage, label, max_rows, keys,
                               raise_on_error) -> ExecResult:
         before = self._safe_storage() if storage else 0
         result = ExecResult(op="exec", ref=str(ref),
@@ -1224,11 +1268,11 @@ class DBToolSuite(ABC):
 
             session = AsyncSession(self, conn, ref, all_refs, exec_id, timed,
                                    label, keys)
+            session.max_rows = max_rows
             start_wall = time.time()
             start = time.perf_counter()
             try:
-                result.value = await self._run_script_async(script, session,
-                                                            params, self)
+                result.value = await self._run_script_async(script, session)
             except UnsupportedOperation as e:
                 result.status, result.error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
             except Exception as e:

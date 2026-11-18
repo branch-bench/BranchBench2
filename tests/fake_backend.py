@@ -42,6 +42,10 @@ class _Cursor:
     def description(self):
         return self._cur.description
 
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
     def close(self):
         self._cur.close()
 
