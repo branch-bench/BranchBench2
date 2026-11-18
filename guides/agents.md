@@ -9,6 +9,77 @@ The branch operations and SQL are available as tools an LLM agent can call:
 Both work on every backend, and every call can be recorded in the
 benchmarks' result format.
 
+## Quick start
+
+**1. Install, and start a database server** (Doltgres here; `dolt`,
+`matrixone`, `seekdb` and `chronos-postgres` work the same way):
+
+```bash
+uv sync --extra mcp                     # add --extra chronos for Chronos
+docker compose up -d --wait doltgres
+```
+
+Connection settings come from the process environment, not from files. The
+compose servers work with the defaults; Chronos also needs
+`export PGSQL_USER=postgres`, and Neon `export NEON_API_KEY_ORG=...`
+([environment.md](environment.md)).
+
+**2. Create and seed the database.** Seed it through the suite, not the
+agent tools: the tools refuse writes to the default branch.
+
+```python
+import dblib
+
+backend = dblib.open_backend("dolt", "agent_demo", create=True)   # or sql_dump="data.sql"
+suite = backend.suite()
+suite.exec(["CREATE TABLE item (id INT PRIMARY KEY, name VARCHAR(32), price DECIMAL(10,2))",
+            "INSERT INTO item VALUES (1, 'apple', 1.50), (2, 'pear', 0.80)"], refs=["main"])
+suite.commit("main", "seed")      # commit before branching: Dolt branches from the last commit
+```
+
+**3a. Give your own agent the tools:**
+
+```python
+from dblib.agent_tools import AgentTools, Guardrails
+
+tools = AgentTools(suite, guardrails=Guardrails(max_live_branches=10))
+tools.definitions("anthropic")    # or "openai": the `tools` list for the API
+tools.call_json(name, arguments)  # run one tool call, JSON result for the model
+```
+
+[From Python](#from-python) has a complete agent loop. Delete the database
+afterwards with `backend.close(drop=True)`.
+
+**3b. Or connect an MCP client** to the database from step 2. For Claude
+Code:
+
+```bash
+claude mcp add branchdb -- uv run --directory /path/to/repo \
+    python -m dblib.mcp_server --backend dolt --db agent_demo
+```
+
+For a client configured with JSON (Claude Desktop and others):
+
+```json
+{"mcpServers": {"branchdb": {
+  "command": "uv",
+  "args": ["run", "--directory", "/path/to/repo", "python", "-m", "dblib.mcp_server",
+           "--backend", "dolt", "--db", "agent_demo", "--record", "/path/to/runs"]}}}
+```
+
+Instead of step 2, the server can make a throwaway database for each
+session: `--create --sql-dump data.sql --drop-on-exit`.
+
+**Before the agent starts:**
+- **It works on branches.** The default branch is protected: the agent
+  creates a branch, changes it, checks it with `diff`, and `merge`s it
+  back. Turn this off with `Guardrails(protected=())` or `--no-protect`.
+- **Its SQL stays on one branch.** Engine branching SQL, `USE`, `SET`,
+  `BEGIN` and other databases are refused; `atomic: true` runs a list as
+  one transaction.
+- **A timeout stops a running statement only on Chronos;** elsewhere the
+  statement finishes and the result says it ran past the timeout.
+
 ## The tools
 
 | Tool | What it does |
