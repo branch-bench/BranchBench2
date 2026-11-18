@@ -1,5 +1,47 @@
 # Database API
 
+## Opening a backend
+
+`dblib.open_suite()` and `dblib.open_backend()` (`dblib/backends.py`) open
+a backend's database in one call, for code that drives it through the API
+directly: an agent, or another benchmark's harness. They use the same
+connectors as the benchmark commands (`dblib/systems/<key>/connector.py`);
+[embedding.md](embedding.md) covers handing a prepared database to the
+benchmark runners instead.
+
+```python
+import dblib
+
+# One suite (one connection) on an existing database:
+suite = dblib.open_suite("dolt", "mydb")
+suite.branch("experiment")
+suite.exec(["UPDATE stock SET s_quantity = s_quantity - 1 WHERE s_i_id = 7"], refs=["experiment"])
+print(suite.diff("main", "experiment").value)
+suite.close_connection()
+
+# Create a fresh database once and give each worker its own suite:
+with dblib.open_backend("matrixone", "bench", create=True, drop_on_close=True) as backend:
+    suites = [backend.suite() for _ in range(4)]     # one connection each
+    ...                                              # the database is deleted on exit
+```
+
+- **Backends** are named by their package in `dblib/systems/`
+  (`dblib.connector_names()` lists them): `dolt`, `dolt_mysql`, `seekdb`,
+  `matrixone`, `neon`, `file_copy`, `chronos`, `bauplan`, plus the
+  experimental `xata` and `terminusdb`.
+- **Connection settings** come from the process environment
+  ([environment.md](environment.md)).
+- **`create=True` (re)creates the database,** deleting one of that name
+  first, and can load a SQL dump (`sql_dump=`). On Neon it creates a
+  project; attaching to an existing Neon database needs `neon_project_id`.
+- **A suite holds one connection** that switches branches, so give every
+  concurrent worker or agent its own.
+- **Results:** pass a `ResultCollector` (`backend.suite(collector)`) to
+  record every operation, as the benchmarks do.
+- **Imports:** a system's package is imported only when its backend is opened.
+
+## The interface
+
 `dblib/db_api.py` defines `DBToolSuite`, the adapter base class every
 database system implements. Built-in adapters live in
 `dblib/systems/<system>/adapter.py`. An

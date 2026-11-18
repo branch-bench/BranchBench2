@@ -1,7 +1,7 @@
 """Neon backend (Lakebase Postgres on Neon).
 
 Branches are Neon branches, each with one read-write compute; the benchmark
-runs in a project of its own (``BackendManager`` creates and deletes it).
+runs in a project of its own (its connector creates and deletes it).
 A branch is its own Postgres endpoint, so connecting to one means opening
 a new connection.
 
@@ -248,7 +248,7 @@ def _endpoint_spec(suspend_timeout: int) -> dict:
 
 
 # ----------------------------------------------------------------------------
-# Project helpers (BackendManager)
+# Project helpers (dblib/systems/neon/connector.py)
 # ----------------------------------------------------------------------------
 
 
