@@ -24,7 +24,7 @@ point-in-time branching (`parent_lsn`), branch restore and `postgres_fdw`:
   commit ref, and a compute; the verb waits for the operations to finish
   and writes a fork row on the new branch (its own LSN and the parent point
   it was cloned from, the base of later merges).
-- `commit()` (composed): a row in the branch's `_bb_commits` table plus
+- `commit()` (native): a row in the branch's `_bb_commits` table plus
   `pg_current_wal_flush_lsn()` as the commit's point in time; `log()` reads
   the table. A commit ref is read through a temporary branch at that LSN,
   cached between uses, deleted when the connection closes.

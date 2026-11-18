@@ -38,12 +38,15 @@ does have: `current_scn()` with flashback reads (`<table> AS OF SNAPSHOT
   server's `undo_retention` (default 30 min; raise it with
   `ALTER SYSTEM SET undo_retention = 86400`) can no longer be read. Flashback
   cannot roll back DDL, so a restore drops the tables and columns the commit's
-  recorded schema does not list (indexes stay). An index built after row
-  updates makes that table's earlier snapshots unreadable for good (error
-  1412): a restore then keeps the table's current rows, a merge or rebase
-  uses the fallback fork point or, failing that, a two-way merge for it,
-  and the verb's result lists the table (`not_restored`,
-  `fallback_base_tables`, `two_way_tables`) with a warning.
+  recorded schema does not list (indexes stay). A flashback read
+  planned through a secondary index created after the snapshot fails with
+  error 1412 although the rows are intact, so every flashback read is
+  forced onto the primary key (`/*+ INDEX(fb PRIMARY) */`). A snapshot that
+  is still unreadable (an index build in progress, a narrowed column) makes
+  a restore keep the table's current rows, and a merge or rebase use the
+  fallback fork point or, failing that, a two-way merge for it; the verb's
+  result lists the table (`not_restored`, `fallback_base_tables`,
+  `two_way_tables`) with a warning.
 - `merge()` and `rebase()` are a SQL three-way merge: base = the fork point
   of whichever side descends from the other (the fork's own content right
   after the fork; the parent at the SCN just before the fork is kept as a

@@ -30,10 +30,10 @@ same summary for the report):
 - `branch()` (native): `CREATE SNAPSHOT` on the parent (the fork point)
   and `DATA BRANCH CREATE DATABASE ... FROM ... {snapshot}`; the new branch
   is snapshotted too so its own delta can be read later.
-- `commit()` (composed): `CREATE SNAPSHOT FOR DATABASE` plus the log row.
+- `commit()` (native): `CREATE SNAPSHOT FOR DATABASE` plus the log row.
   `log()` (simulated) reads the table.
 - `diff()` (native): `DATA BRANCH DIFF ... OUTPUT SUMMARY` per table.
-- `merge()` (composed): `DATA BRANCH MERGE <src>.<t> INTO <dst>.<t> WHEN
+- `merge()` (native): `DATA BRANCH MERGE <src>.<t> INTO <dst>.<t> WHEN
   CONFLICT SKIP|ACCEPT` per table ("ours" | "theirs"); the conflict count,
   and the rows a resolve callable gets (Dolt's `base_*`/`our_*`/`their_*`
   shape), come from the two sides' native diffs against the fork snapshot.
@@ -42,7 +42,7 @@ same summary for the report):
   `ALTER TABLE ADD COLUMN`); a differing primary key is a schema conflict
   and the verb fails without touching data. Set `MO_COUNT_CONFLICTS=0` to
   skip the conflict count when `on_conflict` is "ours"/"theirs".
-- `rebase()` (composed): a re-fork. A temporary clone of the upstream's
+- `rebase()` (simulated): a re-fork. A temporary clone of the upstream's
   head snapshot receives the branch's delta since its fork point through
   `DATA BRANCH PICK ... BETWEEN SNAPSHOT` (the branch's own snapshots;
   key-less tables are replayed row by row), conflicts with the upstream's
@@ -50,7 +50,7 @@ same summary for the report):
   upstream, "theirs" = the branch, as in git), and the clone replaces the
   branch. Its lineage now starts at the upstream head, so MatrixOne's LCA
   for a later merge is that head and the merge sees only newer changes.
-- `reset()` (composed): `DATA BRANCH DIFF` of the head against the commit's
+- `reset()` (simulated): `DATA BRANCH DIFF` of the head against the commit's
   snapshot, undone with SQL (rows added since are deleted, rows changed or
   deleted put back, tables and columns created since dropped). The native
   `RESTORE DATABASE <branch> {snapshot}` (`MO_NATIVE_RESET=1`) does it in

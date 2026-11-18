@@ -16,7 +16,7 @@ Everything beyond branch and delete is built on that clone, on
 `postgres_fdw` (one database reading another's tables) and on plain SQL;
 `DBToolSuite.implementation()` records which is which:
 
-- `branch()` (composed): the clone of the parent, plus, for a fork from a
+- `branch()` (simulated): the clone of the parent, plus, for a fork from a
   branch head, a second clone of the child kept as the merge base (the
   parent moves on); a fork from a commit uses the commit's snapshot as its
   base. A template may have no other connection while it is copied, so the
@@ -27,7 +27,7 @@ Everything beyond branch and delete is built on that clone, on
   done. The wait is part of the verb's latency; the e2e stats'
   `backend_observations` count `parked_connections`, `quiesce_waits`,
   `quiesce_wait_sec` and `clone_retries`.
-- `commit()` (composed): a row in the branch's `_bb_commits` table, then a
+- `commit()` (simulated): a row in the branch's `_bb_commits` table, then a
   clone of the branch database as the commit's snapshot (read-only; a
   commit ref connects to it). A clone costs two checkpoints plus one
   reflink per data file, with the branch's connections parked meanwhile.
@@ -41,9 +41,9 @@ Everything beyond branch and delete is built on that clone, on
   rewritten; `revert()` applies the inverse of (predecessor snapshot ->
   commit snapshot) and records the result as a commit with its own
   snapshot.
-- `reset()` (composed): `DROP DATABASE` of the branch, then `CREATE DATABASE
+- `reset()` (simulated): `DROP DATABASE` of the branch, then `CREATE DATABASE
   ... TEMPLATE <commit snapshot>`; the snapshot's log ends at that commit.
-- `delete()` (native): `DROP DATABASE` of the branch, its bases and its
+- `delete()` (simulated): `DROP DATABASE` of the branch, its bases and its
   snapshots; a snapshot another branch's log still references (a commit
   merged into the spine, a fork from a commit) is kept until the run's
   cleanup, so reverting a deleted candidate's commit still works.

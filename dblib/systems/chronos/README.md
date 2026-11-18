@@ -32,17 +32,21 @@ columns on branches; in that mode Chronos refuses its native
 its native diff and bulk-write primitives. `DBToolSuite.implementation()`
 records which is which:
 
-- `branch()` (composed): `create_checkpoint` on the parent (the fork base,
+- `branch()` (native): `create_checkpoint` on the parent (the fork base,
   kept for later merges) and `create_branch_from_checkpoint`; a fork from a
   commit forks from that commit's checkpoint. Both are metadata
   transactions. Chronos has no checkpoint deletion, so fork bases and
   commits pin their versions for the run.
-- `commit()` (composed): `create_checkpoint` (an immutable interval split;
+- `commit()` (native): `create_checkpoint` (an immutable interval split;
   a commit ref is a read-only session on it) plus a row in the `_bb_log`
   bookkeeping table, which `log()` reads (simulated: Chronos keeps no
   commit history).
-- `diff()` (composed): `ChronosBranchContext.diff` between two branches; a
-  commit ref is read through a temporary branch forked from its checkpoint.
+- `diff()` (simulated): a state comparison in SQL on the server. For each
+  table, the interval rows live at each ref's branch point are full-joined
+  on the primary key and counted as added, deleted or modified. Chronos's
+  own `ChronosBranchContext.diff` walks version history (a key inserted and
+  removed between the two points comes back as modified) and can miss keys,
+  so it is used only in native-only mode.
 - `merge()`, `rebase()` (simulated): a three-way merge in the shim —
   native `diff(base, source)` and `diff(base, target)` against the fork or
   last sync checkpoint, conflicts compared by key, the changes applied with

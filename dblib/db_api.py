@@ -10,9 +10,12 @@ Status handling
 ---------------
 Every verb returns an OpResult instead of raising. A hook the backend did
 not override raises UnsupportedOperation, which the verb turns into an
-UNSUPPORTED row (zero latency, no storage delta) so the workload keeps
-running. A hook that raised anything else produces a FAILED row carrying
-the error. Pass ``raise_on_error=True`` to get the exception instead.
+UNSUPPORTED row (zero latency, no storage delta). An unsupported operation
+ends the workflow: the result collector notifies the driver
+(``on_unsupported``), and the macrobenchmark cancels every worker and
+records the run as unsupported. A hook that raised anything else produces a
+FAILED row carrying the error; failures do not stop a run. Pass
+``raise_on_error=True`` to get the exception instead.
 
 Refs
 ----
