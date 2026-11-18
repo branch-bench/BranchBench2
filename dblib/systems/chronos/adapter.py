@@ -444,7 +444,7 @@ class ChronosToolSuite(DBToolSuite):
     IMPLEMENTATION = {
         "branch": "native",
         "commit": "native",
-        "diff": "native",
+        "diff": "native" if native_only() else "simulated",
         "log": "simulated",
         "merge": "native" if CHRONOS_NATIVE_MERGE else "simulated",
         "rebase": "simulated",
@@ -459,8 +459,10 @@ class ChronosToolSuite(DBToolSuite):
                   "create_branch_from_checkpoint: two metadata transactions, no data copied; "
                   "a commit ref forks from its checkpoint directly. Log rows copied in _bb_log.",
         "commit": "create_checkpoint (a read-only interval split, no data copied) + a _bb_log row",
-        "diff": "native ChronosBranchContext.diff between two branches; a commit ref is read "
-                "through a temporary branch forked from its checkpoint",
+        "diff": "state comparison in SQL on the server: per table, the interval rows live at each "
+                "ref's branch point (the multi-ref view predicate) full-joined on the key, over the "
+                "adapter's own connection (the engine's diff walks version history and its key-based "
+                "reads can resolve stale versions); the schema half from the fingerprint per commit",
         "log": "SELECT from the _bb_log bookkeeping table (Chronos keeps no history of commits)",
         "merge": "three-way merge in the shim: native diff(base, source) and diff(base, target) "
                  "against the fork/sync checkpoint, conflicts compared by key, changes applied "
@@ -1689,20 +1691,79 @@ class ChronosToolSuite(DBToolSuite):
                 break
         return out
 
+    def _state_tables(self, ref: Ref) -> dict:
+        """{table: (physical name, columns, pk columns, branch point)} of
+        the tables a ref's state holds, from the segment the ref resolves
+        to (a commit ref's checkpoint, a branch's current segment)."""
+        seg = self._segment_for(ref)
+        p = int(seg.branch_point)
+        be = self.ctx._backend
+        out = {}
+        for t in be.diff_tables():
+            try:
+                meta = be._meta_for_segment(seg, t)
+            except TableNotRegisteredError:
+                continue
+            out[t] = (meta.physical_name, list(meta.columns), list(meta.pk_columns), p)
+        return out
+
     def _diff_impl(self, ref_a: Ref, ref_b: Ref) -> dict:
         self._adopt()
-        with self._reading(ref_a) as a, self._reading(ref_b) as b:
-            if a == b:
+        per = {}
+        if native_only():
+            # The engine's own answer, as the native cell measures it.
+            with self._reading(ref_a) as a, self._reading(ref_b) as b:
+                if a == b:
+                    return {"tables": [], "rows_added": 0, "rows_deleted": 0, "rows_modified": 0}
+                for d in self.ctx.diff(a, b).changes:
+                    e = per.setdefault(d.table, {"table_name": d.table, "rows_added": 0,
+                                                 "rows_deleted": 0, "rows_modified": 0})
+                    e["rows_added" if d.change == "added" else "rows_deleted" if d.change == "deleted"
+                      else "rows_modified"] += 1
+                ta, tb = self._branch_tables(a), self._branch_tables(b)
+                for t in set(ta) ^ set(tb):
+                    n = len(self._all_rows(b if t in tb else a, t))
+                    per[t] = {"table_name": t, "rows_added": n if t in tb else 0,
+                              "rows_deleted": n if t in ta else 0, "rows_modified": 0}
+        else:
+            # A diff compares the two states, computed on the server: each
+            # table's two states are the interval rows live at each ref's
+            # branch point (the predicate the multi-ref views use), full
+            # joined on the key. Nothing goes through a Chronos session:
+            # the engine's diff() walks version history (keys inserted and
+            # removed in between come back as modified), its key-based
+            # reads can resolve a key to an inherited version (probed
+            # 2026-10-17), and whole-table reads through sessions at W=1
+            # took 30-50 s each and broke its session epoch coordinator.
+            ta, tb = self._state_tables(ref_a), self._state_tables(ref_b)
+            if ta == tb and self._segment_for(ref_a).segment_id == self._segment_for(ref_b).segment_id:
                 return {"tables": [], "rows_added": 0, "rows_deleted": 0, "rows_modified": 0}
-            per = {}
-            for d in self.ctx.diff(a, b).changes:
-                e = per.setdefault(d.table, {"table_name": d.table, "rows_added": 0, "rows_deleted": 0,
-                                             "rows_modified": 0})
-                e["rows_added" if d.change == "added" else "rows_deleted" if d.change == "deleted"
-                  else "rows_modified"] += 1
-            ta, tb = self._branch_tables(a), self._branch_tables(b)
+
+            def live(phys, cols, p):
+                return (f"(SELECT {', '.join(_q(c) for c in cols)} FROM {_q(phys)} "
+                        f"WHERE live_lo <= {p} AND {p} < live_hi AND deleted = FALSE)")
+            for t in sorted(set(ta) & set(tb)):
+                pa, ca, pk, bpa = ta[t]
+                pb, cb, pkb, bpb = tb[t]
+                pk = [c for c in pk if c in cb] or [c for c in pkb if c in ca]
+                if not pk:
+                    continue
+                shared = [c for c in ca if c in cb and c not in pk]
+                on = " AND ".join(f"a.{_q(c)} = b.{_q(c)}" for c in pk)
+                k = _q(pk[0])
+                differs = " OR ".join(f"a.{_q(c)} IS DISTINCT FROM b.{_q(c)}" for c in shared) or "FALSE"
+                row = self._pgx(
+                    f"SELECT COUNT(*) FILTER (WHERE a.{k} IS NULL), "
+                    f"COUNT(*) FILTER (WHERE b.{k} IS NULL), "
+                    f"COUNT(*) FILTER (WHERE a.{k} IS NOT NULL AND b.{k} IS NOT NULL AND ({differs})) "
+                    f"FROM {live(pa, ca, bpa)} a FULL JOIN {live(pb, cb, bpb)} b ON {on}")[0]
+                added, deleted, modified = (int(x or 0) for x in row)
+                if added or deleted or modified:
+                    per[t] = {"table_name": t, "rows_added": added, "rows_deleted": deleted,
+                              "rows_modified": modified}
             for t in set(ta) ^ set(tb):
-                n = len(self._all_rows(b if t in tb else a, t))
+                phys, cols, pk, p = (tb if t in tb else ta)[t]
+                n = int(self._pgx(f"SELECT COUNT(*) FROM {live(phys, cols, p)} x")[0][0])
                 per[t] = {"table_name": t, "rows_added": n if t in tb else 0,
                           "rows_deleted": n if t in ta else 0, "rows_modified": 0}
         tables = [per[t] for t in sorted(per)]
