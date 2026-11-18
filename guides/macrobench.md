@@ -62,7 +62,7 @@ workload {
 
   ```
   scenario: "example"
-  params { key: "branches" value: "4" }
+  params { key: "features" value: "4" }
   ```
 
   An unknown name or a bad value is an error either way. `uv run python -m

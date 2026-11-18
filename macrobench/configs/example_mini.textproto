@@ -1,0 +1,13 @@
+# Example scenario (macrobench/scenarios/template.py), smoke size.
+run_id: "macro_example_mini_dolt"
+backend: DOLT
+database_setup { db_name: "macro_example_mini" cleanup: true generated {} }
+schema { base: NO_BASE }
+workload {
+  branch_ops { commit_interval: 1 }
+  data_ops { worker_threads: 2 }
+  scenario: "example"
+  params { key: "features"         value: "4" }
+  params { key: "rows_per_feature" value: "5" }
+  params { key: "merge_every"      value: "2" }
+}

@@ -49,7 +49,7 @@ docker compose up -d --wait doltgres
 ./scripts/run_macrobench.sh --mini --outdir run_stats context_mgmt dolt
 
 # 4. The offline tests (an in-memory fake backend, no server needed)
-uv run pytest tests/test_db_api.py tests/test_scenarios.py tests/test_macrobench.py
+uv run pytest tests/test_db_api.py tests/test_scenarios.py tests/test_scenario_params.py tests/test_macrobench.py
 ```
 
 Step 3 prints the checks and writes two files to `run_stats/`: a parquet
@@ -96,6 +96,7 @@ records it.
 |---|---|
 | [guides/api.md](guides/api.md) | The Python API: branch operations, refs, `exec()`, conflict resolution, result rows |
 | [guides/macrobench.md](guides/macrobench.md) | The six scenarios, their configuration and intensity knobs, running them, storage measurement |
+| [guides/adding_a_scenario.md](guides/adding_a_scenario.md) | Writing a new scenario: the class, its parameters and checks, tables, configs, tests |
 | [guides/microbench.md](guides/microbench.md) | The per-operation microbenchmark, the single-operation runner and the latency/throughput scripts |
 | [guides/backends.md](guides/backends.md) | Every backend, what it supports, Docker Compose; each system's own README has its setup |
 | [guides/embedding.md](guides/embedding.md) | Calling the runners from another application through `PreparedTarget` |
@@ -108,7 +109,7 @@ records it.
 ```
 dblib/              # the git-like API (db_api.py), prepared targets, connectors, result collection
 dblib/systems/      # one package per database: adapter, connector, metadata, README, server scripts
-macrobench/         # the six scenarios, their configs, schema and data generators, the runner
+macrobench/         # the scenarios (scenarios/, incl. template.py), their configs, schema and data generators, the runner
 microbench/         # the per-operation microbenchmark (verbs/), the single-operation runner
 scripts/            # entry points (run_*.sh) and plotting/ (optional extra: plotting)
 db_setup/           # the CH-benCHmark schema and seed dataset, plus loader scripts
